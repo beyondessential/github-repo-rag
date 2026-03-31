@@ -1,0 +1,30 @@
+[project]
+name = "github-repo-rag"
+version = "0.1.0"
+description = "Generic RAG pipeline for GitHub repositories — ingest, index, and query any repo via pgvector"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg2-binary>=2.9.0",
+    "pgvector>=0.3.0",
+    "voyageai>=0.3.0",
+    "langchain-text-splitters>=0.3.0",
+    "python-dotenv>=1.0.0",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+ask = ["anthropic>=0.40.0"]
+
+[project.scripts]
+github-repo-rag-mcp = "mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["mcp_server"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rag*"]

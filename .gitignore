@@ -1,0 +1,15 @@
+# Environment
+.env
+.venv
+
+# Local agent config (personal, not shared)
+CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Build & packaging
+*.egg-info/
+dist/
+build/

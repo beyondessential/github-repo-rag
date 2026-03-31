@@ -1,0 +1,73 @@
+name: Sync RAG Index
+
+# Scheduled: daily incremental sync for all registered namespaces.
+# Manual (workflow_dispatch): choose sync or full-reindex.
+
+on:
+  schedule:
+    - cron: "0 2 * * *"  # Daily at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Job to run"
+        required: true
+        default: "sync"
+        type: choice
+        options:
+          - sync
+          - full-reindex
+      namespace:
+        description: "Namespace — for sync: leave empty to sync all; for full-reindex: required"
+        required: false
+        default: ""
+      repo_url:
+        description: "GitHub repo URL — required for full-reindex"
+        required: false
+        default: ""
+
+jobs:
+  sync:
+    if: |
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'sync')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - run: uv sync
+
+      - name: Run incremental sync
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.namespace }}" ]; then
+            ARGS="--namespace ${{ github.event.inputs.namespace }}"
+          fi
+          uv run python scripts/sync.py $ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  full-reindex:
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.job == 'full-reindex'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - run: uv sync
+
+      - name: Run full reindex
+        run: |
+          uv run python scripts/ingest.py \
+            --repo "${{ github.event.inputs.repo_url }}" \
+            --namespace "${{ github.event.inputs.namespace }}"
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

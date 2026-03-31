@@ -1,0 +1,3 @@
+[submodule ".maui"]
+	path = .maui
+	url = https://github.com/beyondessential/maui-team
