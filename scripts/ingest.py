@@ -3,8 +3,12 @@
 Ingestion pipeline: clone a GitHub repo → chunk → embed → upsert to pgvector.
 
 Usage:
-    # Auto-clones to a temp directory:
+    # Auto-clones to a temp directory (default branch):
     python scripts/ingest.py --repo https://github.com/beyondessential/tupaia
+
+    # Clone a specific release tag or branch:
+    python scripts/ingest.py --repo https://github.com/beyondessential/tupaia --ref 2.50.5
+    python scripts/ingest.py --repo https://github.com/beyondessential/tupaia --ref main
 
     # Use an existing local checkout:
     python scripts/ingest.py /path/to/tupaia
@@ -225,6 +229,10 @@ def main() -> None:
         "--namespace", default="tupaia",
         help="Table prefix — creates {namespace}_code and {namespace}_docs (default: tupaia)",
     )
+    parser.add_argument(
+        "--ref", default=None,
+        help="Branch name or release tag to index (e.g. 2.50.5, v2.51.3, main). Defaults to the repo's default branch.",
+    )
     args = parser.parse_args()
 
     if args.repo_path:
@@ -232,11 +240,15 @@ def main() -> None:
     else:
         if not args.repo:
             parser.error("--repo URL is required when no local repo_path is given")
+        clone_cmd = ["git", "clone", "--depth=1"]
+        if args.ref:
+            clone_cmd += ["--branch", args.ref]
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = os.path.join(tmpdir, "repo")
-            print(f"Cloning {args.repo} (shallow)...")
+            ref_label = args.ref or "default branch"
+            print(f"Cloning {args.repo} @ {ref_label} (shallow)...")
             subprocess.run(
-                ["git", "clone", "--depth=1", args.repo, repo_path],
+                clone_cmd + [args.repo, repo_path],
                 check=True,
             )
             ingest(repo_path, args.namespace, repo_url=args.repo)

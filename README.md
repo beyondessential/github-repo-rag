@@ -54,7 +54,7 @@ VOYAGE_API_KEY=your-voyage-key
 ## Indexing a repository
 
 ```bash
-# Clone and index automatically
+# Clone and index automatically (default branch)
 uv run python scripts/ingest.py --repo https://github.com/beyondessential/tupaia --namespace tupaia
 
 # Or point at a local checkout
@@ -62,6 +62,25 @@ uv run python scripts/ingest.py /path/to/tupaia --namespace tupaia
 ```
 
 This creates `tupaia_code` and `tupaia_docs` tables in your database. Re-run at any time to refresh; existing chunks are upserted.
+
+### Indexing a specific release or branch
+
+Use `--ref` to index a specific release tag or branch instead of the default branch:
+
+```bash
+# Index a specific release tag
+uv run python scripts/ingest.py --repo https://github.com/beyondessential/tupaia --ref 2.50.5 --namespace tupaia
+
+# Index a specific branch
+uv run python scripts/ingest.py --repo https://github.com/beyondessential/tupaia --ref main --namespace tupaia
+```
+
+To keep multiple versions queryable simultaneously, use a different namespace per version:
+
+```bash
+uv run python scripts/ingest.py --repo https://github.com/beyondessential/tupaia --ref 2.50.5 --namespace tupaia_2_50
+uv run python scripts/ingest.py --repo https://github.com/beyondessential/tupaia --ref 2.51.3 --namespace tupaia_2_51
+```
 
 To index a different repo, change `--repo` and `--namespace`:
 ```bash
