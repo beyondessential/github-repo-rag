@@ -8,7 +8,7 @@ Generic RAG pipeline for GitHub repositories. Index any repo into PostgreSQL (pg
 GitHub repo
     ↓  scripts/ingest.py
     chunk by file/function (langchain-text-splitters)
-    embed with voyage-code-3 (Voyage AI)
+    embed with Voyage AI or Ollama (configurable)
     upsert to PostgreSQL + pgvector
           ↑
     hybrid search at query time
@@ -28,7 +28,9 @@ The MCP server does **retrieval only** — it returns context chunks to the call
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
 - PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension enabled
-- [Voyage AI](https://www.voyageai.com) API key
+- One of:
+  - [Voyage AI](https://www.voyageai.com) API key (default, cloud embeddings)
+  - [Ollama](https://ollama.com) running locally (free, local embeddings)
 
 Enable pgvector on your database (run once):
 ```sql
@@ -45,10 +47,23 @@ cp .env.example .env
 # edit .env with your credentials
 ```
 
-**.env**
+**.env** (Voyage AI — default)
 ```
 DATABASE_URL=postgresql://user:password@localhost:5432/rag
 VOYAGE_API_KEY=your-voyage-key
+```
+
+**.env** (Ollama — local)
+```
+DATABASE_URL=postgresql://user:password@localhost:5432/rag
+EMBED_BACKEND=ollama
+# OLLAMA_HOST=http://localhost:11434   # default
+# OLLAMA_EMBED_MODEL=mxbai-embed-large  # default, 1024 dims
+```
+
+When using Ollama, pull the embedding model first:
+```bash
+ollama pull mxbai-embed-large
 ```
 
 ## Indexing a repository
@@ -136,37 +151,60 @@ Run the server in HTTP mode so multiple agents and team members can share one in
 uv run python mcp_server.py --transport http --host 0.0.0.0 --port 8765
 ```
 
-In HTTP mode the server requires a valid Google OAuth2 access token on every request.
-Configure access restrictions in `.env`:
+#### Deploying to Railway
 
-```
-# Allow anyone from your Google Workspace domain
-GOOGLE_ALLOWED_DOMAIN=bes.au
+The repo includes a `Dockerfile` and `railway.toml` for one-command deploys. The database is already hosted on Railway, so deploying the MCP server there keeps everything on the same internal network.
 
-# Or allowlist specific accounts
-GOOGLE_ALLOWED_EMAILS=alice@example.com,bob@example.com
-```
+1. Install the [Railway CLI](https://docs.railway.com/guides/cli) and log in:
+   ```bash
+   npm install -g @railway/cli
+   railway login
+   ```
 
-Tokens are validated against Google's tokeninfo API. The token must include the `email` scope and belong to a verified Google account.
+2. Link to your existing project (the one with the Postgres database) and create a service:
+   ```bash
+   cd github-repo-rag
+   railway link
+   railway service create github-repo-rag-mcp
+   railway service   # select the new service
+   ```
 
-**Getting a token** (CLI):
-```bash
-gcloud auth print-access-token
-```
+3. Set environment variables:
+   ```bash
+   railway variables set DATABASE_URL='${{Postgres.DATABASE_URL}}'
+   railway variables set VOYAGE_API_KEY=<your-voyage-key>   # or set EMBED_BACKEND=ollama + OLLAMA_HOST
+   railway variables set MCP_API_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+   ```
+   The `${{Postgres.DATABASE_URL}}` reference uses Railway's internal networking (faster, no public internet hop).
 
-**Connecting from Claude Code** (HTTP server):
+4. Deploy and generate a public URL:
+   ```bash
+   railway up
+   railway domain
+   ```
+
+The MCP endpoint will be at `https://<your-railway-domain>/mcp`. A health check is available at `/health`.
+
+#### Authentication
+
+When `MCP_API_KEY` is set, all requests to `/mcp` require a matching `Authorization: Bearer <key>` header. The `/health` endpoint is always public. If `MCP_API_KEY` is not set, the server runs without authentication.
+
+**Connecting from Claude Code** (shared HTTP server):
 ```json
 {
   "mcpServers": {
     "github-repo-rag": {
-      "url": "http://your-server:8765/mcp",
+      "type": "url",
+      "url": "https://<your-railway-domain>/mcp",
       "headers": {
-        "Authorization": "Bearer <google-access-token>"
+        "Authorization": "Bearer <your-mcp-api-key>"
       }
     }
   }
 }
 ```
+
+Add this to `~/.claude/settings.json` (global) or `.mcp.json` (per-project).
 
 The `stdio` transport (default) is for local use only and does not require authentication.
 
@@ -190,11 +228,17 @@ github-repo-rag = { path = "../github-repo-rag", editable = true }
 
 ### Local CLI (retrieve + answer)
 
-For ad-hoc querying from the terminal, `scripts/ask.py` runs the full pipeline locally using Claude. Requires `ANTHROPIC_API_KEY` in `.env`.
+For ad-hoc querying from the terminal, `scripts/ask.py` runs the full pipeline locally. Set `LLM_BACKEND` to choose the answering LLM:
+
+- `anthropic` (default) — requires `ANTHROPIC_API_KEY`
+- `ollama` — requires Ollama running with a chat model (set `OLLAMA_CHAT_MODEL`, default: `llama3.1`)
 
 ```bash
 uv run python scripts/ask.py "How does survey response validation work?"
 uv run python scripts/ask.py --namespace tamanu "How are encounters structured?"
+
+# Use Ollama for answering
+LLM_BACKEND=ollama uv run python scripts/ask.py "How does survey response validation work?"
 ```
 
 ## Incremental reindex

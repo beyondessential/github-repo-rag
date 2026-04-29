@@ -1,0 +1,14 @@
+.env
+.env.*
+.venv/
+.git/
+.maui/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+scripts/
+tests/
+*.md
+LICENSE

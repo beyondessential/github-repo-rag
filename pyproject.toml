@@ -6,14 +6,15 @@ requires-python = ">=3.11"
 dependencies = [
     "psycopg2-binary>=2.9.0",
     "pgvector>=0.3.0",
-    "voyageai>=0.3.0",
     "langchain-text-splitters>=0.3.0",
     "python-dotenv>=1.0.0",
     "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
-ask = ["anthropic>=0.40.0"]
+voyage = ["voyageai>=0.3.0"]
+ollama = ["ollama>=0.4.0"]
+anthropic = ["anthropic>=0.40.0"]
 
 [project.scripts]
 github-repo-rag-mcp = "mcp_server:main"

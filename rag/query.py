@@ -1,26 +1,47 @@
 """
 Query pipeline: embed → hybrid retrieve from pgvector.
+
+Embedding backend is selected via the EMBED_BACKEND env var:
+  - "voyage" (default) — Voyage AI voyage-code-3 (requires VOYAGE_API_KEY)
+  - "ollama"           — local Ollama (requires OLLAMA_HOST or default localhost)
 """
 
 import os
 
-import voyageai
-
 _DEFAULT_TABLES = ["tupaia_code", "tupaia_docs"]
+_EMBED_BACKEND = os.environ.get("EMBED_BACKEND", "voyage").lower()
 
 
-def embed(text: str, input_type: str = "query") -> list[float]:
-    """Embed a single text using voyage-code-3."""
-    client = voyageai.Client(api_key=os.environ["VOYAGE_API_KEY"])
-    result = client.embed([text], model="voyage-code-3", input_type=input_type)
-    return result.embeddings[0]
+def _embed_voyage(texts: list[str], input_type: str) -> list[list[float]]:
+    import voyageai
 
-
-def embed_batch(texts: list[str], input_type: str = "document") -> list[list[float]]:
-    """Embed a batch of texts (max 128 per call for voyage-code-3)."""
     client = voyageai.Client(api_key=os.environ["VOYAGE_API_KEY"])
     result = client.embed(texts, model="voyage-code-3", input_type=input_type)
     return result.embeddings
+
+
+def _embed_ollama(texts: list[str], input_type: str) -> list[list[float]]:
+    import ollama
+
+    model = os.environ.get("OLLAMA_EMBED_MODEL", "mxbai-embed-large")
+    result = ollama.embed(model=model, input=texts)
+    return result["embeddings"]
+
+
+def _embed_texts(texts: list[str], input_type: str) -> list[list[float]]:
+    if _EMBED_BACKEND == "ollama":
+        return _embed_ollama(texts, input_type)
+    return _embed_voyage(texts, input_type)
+
+
+def embed(text: str, input_type: str = "query") -> list[float]:
+    """Embed a single text."""
+    return _embed_texts([text], input_type)[0]
+
+
+def embed_batch(texts: list[str], input_type: str = "document") -> list[list[float]]:
+    """Embed a batch of texts."""
+    return _embed_texts(texts, input_type)
 
 
 def retrieve(

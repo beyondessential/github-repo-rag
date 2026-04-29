@@ -47,8 +47,11 @@ jobs:
           uv run python scripts/sync.py $ARGS
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EMBED_BACKEND: ${{ secrets.EMBED_BACKEND || 'voyage' }}
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OLLAMA_HOST: ${{ secrets.OLLAMA_HOST }}
+          OLLAMA_EMBED_MODEL: ${{ secrets.OLLAMA_EMBED_MODEL }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
 
   full-reindex:
     if: |
@@ -69,5 +72,8 @@ jobs:
             --namespace "${{ github.event.inputs.namespace }}"
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EMBED_BACKEND: ${{ secrets.EMBED_BACKEND || 'voyage' }}
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OLLAMA_HOST: ${{ secrets.OLLAMA_HOST }}
+          OLLAMA_EMBED_MODEL: ${{ secrets.OLLAMA_EMBED_MODEL }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
