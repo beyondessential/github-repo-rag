@@ -13,7 +13,13 @@ _EMBED_BACKEND = os.environ.get("EMBED_BACKEND", "voyage").lower()
 
 
 def _embed_voyage(texts: list[str], input_type: str) -> list[list[float]]:
-    import voyageai
+    try:
+        import voyageai
+    except ImportError:
+        raise ImportError(
+            "voyageai is not installed. Run `uv sync --extra voyage` "
+            "or set EMBED_BACKEND=ollama to use local embeddings."
+        )
 
     client = voyageai.Client(api_key=os.environ["VOYAGE_API_KEY"])
     result = client.embed(texts, model="voyage-code-3", input_type=input_type)
@@ -21,7 +27,13 @@ def _embed_voyage(texts: list[str], input_type: str) -> list[list[float]]:
 
 
 def _embed_ollama(texts: list[str], input_type: str) -> list[list[float]]:
-    import ollama
+    try:
+        import ollama
+    except ImportError:
+        raise ImportError(
+            "ollama is not installed. Run `uv sync --extra ollama` "
+            "or set EMBED_BACKEND=voyage to use Voyage AI embeddings."
+        )
 
     model = os.environ.get("OLLAMA_EMBED_MODEL", "mxbai-embed-large")
     result = ollama.embed(model=model, input=texts)
