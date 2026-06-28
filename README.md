@@ -252,12 +252,6 @@ CHANGED_FILES="src/foo.ts src/bar.ts" DELETED_FILES="src/old.ts" \
 
 The GitHub Actions workflow (`.github/workflows/reindex.yml`) runs a full reindex every Monday and can be triggered manually via `workflow_dispatch`.
 
-## Code review
-
-Pull requests are automatically reviewed by Claude via `.github/workflows/claude-code-review.yml`, which delegates to the shared [`maui-team`](https://github.com/beyondessential/maui-team) workflow. Re-trigger a review by commenting `/review` on any PR.
-
-Requires `ANTHROPIC_API_KEY` set as a repository secret.
-
 ## File structure
 
 ```
@@ -275,6 +269,5 @@ AGENTS.md              # AI agent context (imports from .maui/knowledge/)
 .github/
   workflows/
     reindex.yml        # weekly GitHub Actions reindex
-    claude-code-review.yml  # automated PR review via Claude
 .env.example
 ```
