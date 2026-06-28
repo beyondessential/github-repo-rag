@@ -1,0 +1,16 @@
+name: Sync CODEOWNERS
+
+# Keeps .github/CODEOWNERS in sync with the canonical templates/CODEOWNERS in
+# the maui-team repo. See beyondessential/maui-team .github/workflows/README.md.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # weekly, Monday 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  sync:
+    uses: beyondessential/maui-team/.github/workflows/sync-codeowners.yml@main
+    permissions:
+      contents: write
+      pull-requests: write

@@ -1,0 +1,17 @@
+# Canonical CODEOWNERS for Maui team repositories.
+#
+# This is the source of truth. Consuming repos do NOT edit their own
+# .github/CODEOWNERS by hand — the `sync-codeowners` reusable workflow copies
+# this file into <repo>/.github/CODEOWNERS and opens a PR when it drifts.
+#
+# GitHub only reads CODEOWNERS from a repo's root, .github/, or docs/ on the
+# default branch, so the file must physically exist in each repo; it cannot be
+# read from the .maui submodule directly.
+#
+# See https://docs.github.com/articles/about-code-owners
+
+# CI workflows, deployment config, and the CODEOWNERS file itself.
+/.github/ @beyondessential/maui
+
+# Any Python file, anywhere in the repo.
+*.py @beyondessential/maui

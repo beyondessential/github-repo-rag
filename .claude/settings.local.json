@@ -1,0 +1,6 @@
+{
+  "enabledMcpjsonServers": [
+    "github-repo-rag"
+  ],
+  "enableAllProjectMcpServers": true
+}
