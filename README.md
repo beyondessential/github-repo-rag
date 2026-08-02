@@ -250,7 +250,7 @@ CHANGED_FILES="src/foo.ts src/bar.ts" DELETED_FILES="src/old.ts" \
   uv run python scripts/reindex.py /path/to/repo --namespace tupaia
 ```
 
-The GitHub Actions workflow (`.github/workflows/reindex.yml`) runs a full reindex every Monday and can be triggered manually via `workflow_dispatch`.
+The GitHub Actions workflow (`.github/workflows/reindex.yml`) runs an incremental sync of all registered namespaces daily at 15:00 UTC (via `scripts/sync.py`). It can also be triggered manually via `workflow_dispatch` to run either a `sync` or a `full-reindex`.
 
 ## File structure
 
@@ -262,12 +262,13 @@ rag/
   auth.py              # Google OAuth token verifier (HTTP transport)
 scripts/
   ingest.py            # full ingestion CLI
+  sync.py              # incremental sync of registered namespaces (used by the daily workflow)
   reindex.py           # incremental reindex CLI
   ask.py               # local CLI: retrieve + answer with Claude
 .maui/                 # submodule: shared AI knowledge and reusable workflows
 AGENTS.md              # AI agent context (imports from .maui/knowledge/)
 .github/
   workflows/
-    reindex.yml        # weekly GitHub Actions reindex
+    reindex.yml        # daily GitHub Actions incremental sync (15:00 UTC)
 .env.example
 ```
