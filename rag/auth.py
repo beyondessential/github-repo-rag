@@ -20,18 +20,25 @@ class GoogleTokenVerifier:
 
     Access is restricted by domain and/or email allowlist:
         - ``allowed_domain``: only emails from this domain are accepted
-          (e.g. ``"beyondessential.com.au"``)
+          (e.g. ``"bes.au"``)
         - ``allowed_emails``: only these specific emails are accepted
         - If both are empty, any verified Google account is accepted.
+
+    ``allowed_client_ids`` binds tokens to our own OAuth client: the token's
+    ``aud``/``azp`` must match one of these. Without it, any valid Google token
+    for a permitted user — issued to *any* app the user has used — would be
+    accepted, allowing token replay. Leave empty only for local testing.
     """
 
     def __init__(
         self,
         allowed_domain: str = "",
         allowed_emails: list[str] | None = None,
+        allowed_client_ids: list[str] | None = None,
     ) -> None:
         self.allowed_domain = allowed_domain
         self.allowed_emails = set(allowed_emails or [])
+        self.allowed_client_ids = set(allowed_client_ids or [])
 
     async def verify_token(self, token: str) -> AccessToken | None:
         """Validate a Google OAuth2 access token.
@@ -57,6 +64,14 @@ class GoogleTokenVerifier:
                 return None  # token missing email scope
             if not info.get("email_verified"):
                 return None  # unverified email
+
+            # Audience binding: the token must have been issued to our OAuth
+            # client, not merely to some other app the user has authorised.
+            if self.allowed_client_ids:
+                aud = info.get("aud", "")
+                azp = info.get("azp", "")
+                if aud not in self.allowed_client_ids and azp not in self.allowed_client_ids:
+                    return None
 
             # Domain restriction
             if self.allowed_domain and not email.endswith(f"@{self.allowed_domain}"):
