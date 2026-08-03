@@ -8,7 +8,7 @@ Generic RAG pipeline for GitHub repositories. Index any repo into PostgreSQL (pg
 GitHub repo
     ↓  scripts/ingest.py
     chunk by file/function (langchain-text-splitters)
-    embed with Voyage AI or Ollama (configurable)
+    embed with voyage-code-3 (Voyage AI)
     upsert to PostgreSQL + pgvector
           ↑
     hybrid search at query time
@@ -28,9 +28,7 @@ The MCP server does **retrieval only** — it returns context chunks to the call
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
 - PostgreSQL with the [pgvector](https://github.com/pgvector/pgvector) extension enabled
-- One of:
-  - [Voyage AI](https://www.voyageai.com) API key (default, cloud embeddings)
-  - [Ollama](https://ollama.com) running locally (free, local embeddings)
+- [Voyage AI](https://www.voyageai.com) API key
 
 Enable pgvector on your database (run once):
 ```sql
@@ -47,23 +45,10 @@ cp .env.example .env
 # edit .env with your credentials
 ```
 
-**.env** (Voyage AI — default)
+**.env**
 ```
 DATABASE_URL=postgresql://user:password@localhost:5432/rag
 VOYAGE_API_KEY=your-voyage-key
-```
-
-**.env** (Ollama — local)
-```
-DATABASE_URL=postgresql://user:password@localhost:5432/rag
-EMBED_BACKEND=ollama
-# OLLAMA_HOST=http://localhost:11434   # default
-# OLLAMA_EMBED_MODEL=mxbai-embed-large  # default, 1024 dims
-```
-
-When using Ollama, pull the embedding model first:
-```bash
-ollama pull mxbai-embed-large
 ```
 
 ## Indexing a repository
@@ -151,60 +136,76 @@ Run the server in HTTP mode so multiple agents and team members can share one in
 uv run python mcp_server.py --transport http --host 0.0.0.0 --port 8765
 ```
 
-#### Deploying to Railway
+In HTTP mode **this server is its own OAuth authorization server**. MCP clients
+(Claude Code, the claude.ai connector) register with it automatically via
+Dynamic Client Registration and sign in through it; the server brokers a second
+OAuth exchange with Google behind the scenes and mints its own tokens. Clients
+need only the server URL — **no Google client id/secret of their own**, and no
+manually pasted access token.
 
-The repo includes a `Dockerfile` and `railway.toml` for one-command deploys. The database is already hosted on Railway, so deploying the MCP server there keeps everything on the same internal network.
+Configure access in `.env` (or the deploy environment):
 
-1. Install the [Railway CLI](https://docs.railway.com/guides/cli) and log in:
-   ```bash
-   npm install -g @railway/cli
-   railway login
-   ```
+```
+# This server's externally reachable base URL — advertised as the OAuth
+# authorization server via /.well-known/oauth-authorization-server, and the base
+# for the Google callback redirect URI.
+MCP_PUBLIC_URL=https://your-app.up.railway.app
 
-2. Link to your existing project (the one with the Postgres database) and create a service:
-   ```bash
-   cd github-repo-rag
-   railway link
-   railway service create github-repo-rag-mcp
-   railway service   # select the new service
-   ```
+# The server-side Google "Web application" OAuth client used to broker sign-in.
+# The secret is confidential — set it in the deploy environment, never commit it.
+GOOGLE_OAUTH_CLIENT_ID=123-abc.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_SECRET=your-client-secret
 
-3. Set environment variables:
-   ```bash
-   railway variables set DATABASE_URL='${{Postgres.DATABASE_URL}}'
-   railway variables set VOYAGE_API_KEY=<your-voyage-key>   # or set EMBED_BACKEND=ollama + OLLAMA_HOST
-   railway variables set MCP_API_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
-   ```
-   The `${{Postgres.DATABASE_URL}}` reference uses Railway's internal networking (faster, no public internet hop).
+# Allow anyone from your Google Workspace domain
+GOOGLE_ALLOWED_DOMAIN=bes.au
 
-4. Deploy and generate a public URL:
-   ```bash
-   railway up
-   railway domain
-   ```
+# Or allowlist specific accounts
+GOOGLE_ALLOWED_EMAILS=alice@example.com,bob@example.com
+```
 
-The MCP endpoint will be at `https://<your-railway-domain>/mcp`. A health check is available at `/health`.
+At sign-in the brokered Google token is validated against Google's tokeninfo API:
+it must include the `email` scope, belong to a verified account, satisfy the
+domain / email allowlist, and have been issued to `GOOGLE_OAUTH_CLIENT_ID`.
+Clients then present the server's own opaque bearer token; Google tokens are kept
+server-side and never handed to clients.
 
-#### Authentication
+> **Single instance:** login state and issued tokens are held in memory, so a
+> server restart makes clients re-authenticate. Move these stores to Postgres
+> before scaling to more than one instance.
 
-When `MCP_API_KEY` is set, all requests to `/mcp` require a matching `Authorization: Bearer <key>` header. The `/health` endpoint is always public. If `MCP_API_KEY` is not set, the server runs without authentication.
+#### One-time Google Cloud Console setup
 
-**Connecting from Claude Code** (shared HTTP server):
+1. Open **APIs & Services → OAuth consent screen** and set **User type = Internal** — this restricts sign-in to your Workspace domain automatically.
+2. Open **APIs & Services → Credentials → Create credentials → OAuth client ID**, type **Web application**.
+3. Under **Authorised redirect URIs**, add **this server's** callback:
+   `https://your-app.up.railway.app/auth/google/callback`
+   (i.e. `<MCP_PUBLIC_URL>/auth/google/callback`). This is the *server's* redirect,
+   not the client's — clients no longer register their own redirect with Google.
+4. Copy the **Client ID** and **Client secret** into `GOOGLE_OAUTH_CLIENT_ID` /
+   `GOOGLE_OAUTH_CLIENT_SECRET` in the deploy environment.
+
+#### Connecting from claude.ai (custom connector)
+
+1. **Settings → Connectors → Add custom connector**.
+2. **Remote MCP server URL**: `https://your-app.up.railway.app/mcp` (the full `/mcp` path).
+3. **Connect** — no Advanced settings / client id needed. The connector registers
+   automatically and redirects you to Google to sign in with a Workspace account.
+
+#### Connecting from Claude Code (HTTP server)
+
+Register the server with just its URL — Claude Code discovers OAuth, registers,
+and opens a browser to sign in (complete it with `/mcp`):
+
 ```json
 {
   "mcpServers": {
     "github-repo-rag": {
-      "type": "url",
-      "url": "https://<your-railway-domain>/mcp",
-      "headers": {
-        "Authorization": "Bearer <your-mcp-api-key>"
-      }
+      "type": "http",
+      "url": "https://your-app.up.railway.app/mcp"
     }
   }
 }
 ```
-
-Add this to `~/.claude/settings.json` (global) or `.mcp.json` (per-project).
 
 The `stdio` transport (default) is for local use only and does not require authentication.
 
@@ -228,17 +229,11 @@ github-repo-rag = { path = "../github-repo-rag", editable = true }
 
 ### Local CLI (retrieve + answer)
 
-For ad-hoc querying from the terminal, `scripts/ask.py` runs the full pipeline locally. Set `LLM_BACKEND` to choose the answering LLM:
-
-- `anthropic` (default) — requires `ANTHROPIC_API_KEY`
-- `ollama` — requires Ollama running with a chat model (set `OLLAMA_CHAT_MODEL`, default: `llama3.1`)
+For ad-hoc querying from the terminal, `scripts/ask.py` runs the full pipeline locally using Claude. Requires `ANTHROPIC_API_KEY` in `.env`.
 
 ```bash
 uv run python scripts/ask.py "How does survey response validation work?"
 uv run python scripts/ask.py --namespace tamanu "How are encounters structured?"
-
-# Use Ollama for answering
-LLM_BACKEND=ollama uv run python scripts/ask.py "How does survey response validation work?"
 ```
 
 ## Incremental reindex
@@ -251,6 +246,12 @@ CHANGED_FILES="src/foo.ts src/bar.ts" DELETED_FILES="src/old.ts" \
 ```
 
 The GitHub Actions workflow (`.github/workflows/reindex.yml`) runs a full reindex every Monday and can be triggered manually via `workflow_dispatch`.
+
+## Code review
+
+Pull requests are automatically reviewed by Claude via `.github/workflows/claude-code-review.yml`, which delegates to the shared [`maui-team`](https://github.com/beyondessential/maui-team) workflow. Re-trigger a review by commenting `/review` on any PR.
+
+Requires `ANTHROPIC_API_KEY` set as a repository secret.
 
 ## File structure
 
@@ -269,5 +270,6 @@ AGENTS.md              # AI agent context (imports from .maui/knowledge/)
 .github/
   workflows/
     reindex.yml        # weekly GitHub Actions reindex
+    claude-code-review.yml  # automated PR review via Claude
 .env.example
 ```

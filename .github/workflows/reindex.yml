@@ -5,7 +5,7 @@ name: Sync RAG Index
 
 on:
   schedule:
-    - cron: "0 2 * * *"  # Daily at 02:00 UTC
+    - cron: "0 15 * * *"  # Daily at 15:00 UTC
   workflow_dispatch:
     inputs:
       job:
@@ -31,6 +31,7 @@ jobs:
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'sync')
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
@@ -47,10 +48,7 @@ jobs:
           uv run python scripts/sync.py $ARGS
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          EMBED_BACKEND: ${{ secrets.EMBED_BACKEND || 'voyage' }}
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
-          OLLAMA_HOST: ${{ secrets.OLLAMA_HOST }}
-          OLLAMA_EMBED_MODEL: ${{ secrets.OLLAMA_EMBED_MODEL }}
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
 
   full-reindex:
@@ -58,6 +56,7 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       github.event.inputs.job == 'full-reindex'
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
@@ -72,8 +71,5 @@ jobs:
             --namespace "${{ github.event.inputs.namespace }}"
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          EMBED_BACKEND: ${{ secrets.EMBED_BACKEND || 'voyage' }}
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
-          OLLAMA_HOST: ${{ secrets.OLLAMA_HOST }}
-          OLLAMA_EMBED_MODEL: ${{ secrets.OLLAMA_EMBED_MODEL }}
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}

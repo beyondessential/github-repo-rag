@@ -4,7 +4,7 @@ MCP server for github-repo-rag.
 
 Two transport modes:
   stdio (default) — local subprocess, no auth needed.
-  http            — network server, optional API key auth.
+  http            — network server, Google OAuth required.
 
 Usage:
     # Local (Claude Code / local agents):
@@ -28,20 +28,68 @@ load_dotenv(Path(__file__).parent / ".env")
 
 # ── MCP server factory ─────────────────────────────────────────────────────────
 
-def _build_mcp(host: str, port: int):
-    """Build a FastMCP instance."""
+def _build_mcp(host: str, port: int, with_auth: bool):
+    """Build a FastMCP instance with or without Google auth."""
     from mcp.server.fastmcp import FastMCP
 
-    mcp = FastMCP("github-repo-rag", host=host, port=port)
+    if with_auth:
+        from mcp.server.auth.settings import (
+            AuthSettings,
+            ClientRegistrationOptions,
+            RevocationOptions,
+        )
 
-    # ── Health check ──────────────────────────────────────────────────────────
+        from rag.oauth_proxy import GoogleOAuthProxyProvider
 
-    from starlette.requests import Request
-    from starlette.responses import JSONResponse
+        allowed_domain = os.environ.get("GOOGLE_ALLOWED_DOMAIN", "")
+        allowed_emails = [
+            e.strip()
+            for e in os.environ.get("GOOGLE_ALLOWED_EMAILS", "").split(",")
+            if e.strip()
+        ]
+        public_url = os.environ["MCP_PUBLIC_URL"].rstrip("/")
+        callback_path = os.environ.get("MCP_OAUTH_CALLBACK_PATH", "/auth/google/callback")
 
-    @mcp.custom_route("/health", methods=["GET"])
-    async def health_check(request: Request) -> JSONResponse:
-        return JSONResponse({"status": "ok"})
+        # This server acts as the authorization server the MCP client registers
+        # with (via DCR), and brokers a second OAuth exchange with Google. That
+        # sidesteps Google's lack of Dynamic Client Registration: clients need
+        # only our URL, never a Google client id/secret.
+        provider = GoogleOAuthProxyProvider(
+            public_url=public_url,
+            google_client_id=os.environ["GOOGLE_OAUTH_CLIENT_ID"],
+            google_client_secret=os.environ["GOOGLE_OAUTH_CLIENT_SECRET"],
+            callback_path=callback_path,
+            allowed_domain=allowed_domain,
+            allowed_emails=allowed_emails or None,
+        )
+
+        mcp = FastMCP(
+            "github-repo-rag",
+            host=host,
+            port=port,
+            # issuer_url = this server: we are the authorization server clients
+            # discover and register with. resource_server_url exposes
+            # /.well-known/oauth-protected-resource pointing back at us.
+            auth=AuthSettings(
+                issuer_url=public_url,
+                resource_server_url=public_url,
+                client_registration_options=ClientRegistrationOptions(
+                    enabled=True,
+                    valid_scopes=["openid", "email", "profile"],
+                    default_scopes=["openid", "email"],
+                ),
+                revocation_options=RevocationOptions(enabled=True),
+            ),
+            auth_server_provider=provider,
+        )
+
+        # Google redirects back here after sign-in; the provider completes the
+        # exchange and bounces the browser to the MCP client's redirect_uri.
+        @mcp.custom_route(callback_path, methods=["GET"])
+        async def _google_callback(request):  # noqa: ANN001, ANN202
+            return await provider.handle_google_callback(request)
+    else:
+        mcp = FastMCP("github-repo-rag", host=host, port=port)
 
     # ── Tools ──────────────────────────────────────────────────────────────────
 
@@ -274,39 +322,6 @@ def _build_mcp(host: str, port: int):
     return mcp
 
 
-# ── API key middleware ────────────────────────────────────────────────────────
-
-def _wrap_with_api_key_auth(app):
-    """Wrap a Starlette app with API key verification.
-
-    Checks for MCP_API_KEY env var. If set, requires all requests (except
-    /health) to include a matching Authorization: Bearer <key> header.
-    """
-    from starlette.responses import JSONResponse
-
-    api_key = os.environ.get("MCP_API_KEY", "")
-
-    async def middleware(scope, receive, send):
-        if scope["type"] == "http" and api_key:
-            from starlette.requests import Request
-
-            request = Request(scope, receive, send)
-            # Let health check through without auth
-            if request.url.path != "/health":
-                auth_header = request.headers.get("authorization", "")
-                if not auth_header.startswith("Bearer ") or auth_header[7:] != api_key:
-                    response = JSONResponse(
-                        {"error": "unauthorized", "message": "Invalid or missing API key"},
-                        status_code=401,
-                        headers={"WWW-Authenticate": "Bearer"},
-                    )
-                    await response(scope, receive, send)
-                    return
-        await app(scope, receive, send)
-
-    return middleware
-
-
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -315,7 +330,7 @@ def main() -> None:
         "--transport",
         choices=["stdio", "http"],
         default="stdio",
-        help="Transport: stdio (default, local) or http (network)",
+        help="Transport: stdio (default, local) or http (network, Google auth enforced)",
     )
     parser.add_argument(
         "--host",
@@ -330,32 +345,42 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    mcp = _build_mcp(host=args.host, port=args.port)
-
-    if args.transport == "http":
-        import uvicorn
-
-        # Build the Starlette app, optionally wrapped with API key auth
-        starlette_app = mcp.streamable_http_app()
-        if os.environ.get("MCP_API_KEY"):
-            starlette_app = _wrap_with_api_key_auth(starlette_app)
-            print("API key auth enabled (MCP_API_KEY is set)")
-        else:
-            print(
-                "WARNING: HTTP mode started without auth. "
-                "Set MCP_API_KEY in env vars to restrict access."
+    # Google auth is required for HTTP when a domain or allowlist is configured.
+    # Running HTTP without auth is allowed but prints a warning.
+    with_auth = args.transport == "http" and bool(
+        os.environ.get("GOOGLE_ALLOWED_DOMAIN") or os.environ.get("GOOGLE_ALLOWED_EMAILS")
+    )
+    if with_auth:
+        missing = [
+            name
+            for name in (
+                "MCP_PUBLIC_URL",
+                "GOOGLE_OAUTH_CLIENT_ID",
+                "GOOGLE_OAUTH_CLIENT_SECRET",
+            )
+            if not os.environ.get(name)
+        ]
+        if missing:
+            raise SystemExit(
+                "Missing required OAuth settings for HTTP auth: "
+                + ", ".join(missing)
+                + ". MCP_PUBLIC_URL is this server's public base URL "
+                "(e.g. https://your-app.up.railway.app); GOOGLE_OAUTH_CLIENT_ID / "
+                "GOOGLE_OAUTH_CLIENT_SECRET are the server-side Google web client "
+                "used to broker sign-in. Its authorised redirect URI must be "
+                "<MCP_PUBLIC_URL>/auth/google/callback."
             )
 
+    mcp = _build_mcp(host=args.host, port=args.port, with_auth=with_auth)
+
+    if args.transport == "http":
+        if not with_auth:
+            print(
+                "WARNING: HTTP mode started without Google auth. "
+                "Set GOOGLE_ALLOWED_DOMAIN or GOOGLE_ALLOWED_EMAILS in .env to restrict access."
+            )
         print(f"Starting MCP server on http://{args.host}:{args.port}/mcp")
-        config = uvicorn.Config(
-            starlette_app,
-            host=args.host,
-            port=args.port,
-            log_level="info",
-        )
-        server = uvicorn.Server(config)
-        import anyio
-        anyio.run(server.serve)
+        mcp.run(transport="streamable-http")
     else:
         mcp.run()
 
