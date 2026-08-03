@@ -14,6 +14,8 @@ RUN uv sync --frozen --no-dev --no-install-project
 # Copy application code
 COPY mcp_server.py ./
 COPY rag/ ./rag/
+# scripts/ powers the scheduled reindex (Railway cron service runs scripts/sync.py)
+COPY scripts/ ./scripts/
 
 # Railway injects PORT; default to 8765 for local testing
 ENV PORT=8765
