@@ -238,38 +238,54 @@ uv run python scripts/ask.py --namespace tamanu "How are encounters structured?"
 
 ## Incremental reindex
 
-For keeping an index up to date after changes, set `CHANGED_FILES` and `DELETED_FILES` (space-separated repo-relative paths) and run:
+`scripts/ingest.py --repo` registers its namespace automatically, so anything indexed via [Indexing a repository](#indexing-a-repository) is already eligible for sync. `scripts/sync.py` then keeps every registered namespace up to date: for each one it compares the last-indexed commit SHA against the latest on the default branch, re-embeds only the changed files, and deletes chunks for removed files. It falls back to a full reindex when the diff is too large for GitHub's compare API (> 250 commits or ≥ 300 files changed).
 
 ```bash
-CHANGED_FILES="src/foo.ts src/bar.ts" DELETED_FILES="src/old.ts" \
-  uv run python scripts/reindex.py /path/to/repo --namespace tupaia
+uv run python scripts/sync.py                     # sync all registered namespaces
+uv run python scripts/sync.py --namespace tupaia   # sync one namespace
 ```
 
-The GitHub Actions workflow (`.github/workflows/reindex.yml`) runs a full reindex every Monday and can be triggered manually via `workflow_dispatch`.
+In production this runs on a schedule via a Railway cron service — see [Deployment](#deployment).
+
+Two lower-level scripts back this:
+- `scripts/register.py` — register (or re-register) a namespace's baseline commit SHA without re-ingesting. Useful after a manual `ingest.py` run, or to clear the SHA and force a full reindex on the next sync.
+- `scripts/reindex.py` — re-embed an explicit set of changed/deleted files, given as `CHANGED_FILES` / `DELETED_FILES` (space-separated repo-relative paths). This is the primitive `sync.py` builds on; call it directly only if you already know exactly which files changed.
+
+## Deployment
+
+The MCP server and the scheduled sync run as two separate services in the same Railway project, sharing the internal Postgres instance.
+
+### MCP server
+
+Deploys from [`railway.toml`](railway.toml) (Dockerfile build). Needs the base `DATABASE_URL` / `VOYAGE_API_KEY` from [Setup](#setup), plus the HTTP-mode env vars from [MCP over HTTP](#mcp-over-http-shared-team-server), in the service's Variables tab.
+
+### Scheduled sync (cron service)
+
+The daily incremental sync runs as a separate Railway service (not defined in a repo file — configured directly in the Railway dashboard):
+
+1. In the same Railway project, **+ New → Empty Service**, connected to this repo so it builds from the same `Dockerfile` (which copies `scripts/` into the image).
+2. **Settings → Deploy → Custom Start Command:**
+   ```
+   uv run python scripts/sync.py
+   ```
+3. **Settings → Deploy → Cron Schedule:**
+   ```
+   0 15 * * *
+   ```
+   Setting a cron schedule makes Railway run the container to completion on that schedule instead of keeping it up as a long-lived service.
+4. **Variables:**
+   - `DATABASE_URL` — reference the **internal** URL from the Postgres service (e.g. `${{Postgres.DATABASE_URL}}`), not `DATABASE_PUBLIC_URL`. This is why the cron service lives inside the Railway project: the sync job runs over the private network, so Postgres never needs a public port.
+   - `VOYAGE_API_KEY` — Voyage AI key.
+   - `GITHUB_TOKEN` — optional; raises the GitHub API rate limit from 60 to 5000 req/hr.
+5. Deploy, then check **Deployments** to confirm it runs once per schedule rather than continuously.
+
+For an ad-hoc full reindex of one namespace, override the start command on that service for a single run, or run locally:
+```bash
+uv run python scripts/ingest.py --repo <repo_url> --namespace <namespace>
+```
 
 ## Code review
 
 Pull requests are automatically reviewed by Claude via `.github/workflows/claude-code-review.yml`, which delegates to the shared [`maui-team`](https://github.com/beyondessential/maui-team) workflow. Re-trigger a review by commenting `/review` on any PR.
 
 Requires `ANTHROPIC_API_KEY` set as a repository secret.
-
-## File structure
-
-```
-mcp_server.py          # MCP server (search_codebase, get_file, list_files, get_repo_structure, list_namespaces, namespace_info)
-rag/
-  query.py             # embed(), retrieve()
-  db.py                # setup_db(), upsert_chunks(), delete_file_chunks()
-  auth.py              # Google OAuth token verifier (HTTP transport)
-scripts/
-  ingest.py            # full ingestion CLI
-  reindex.py           # incremental reindex CLI
-  ask.py               # local CLI: retrieve + answer with Claude
-.maui/                 # submodule: shared AI knowledge and reusable workflows
-AGENTS.md              # AI agent context (imports from .maui/knowledge/)
-.github/
-  workflows/
-    reindex.yml        # weekly GitHub Actions reindex
-    claude-code-review.yml  # automated PR review via Claude
-.env.example
-```
