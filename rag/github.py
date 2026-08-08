@@ -33,6 +33,18 @@ def parse_repo_url(repo_url: str) -> tuple[str, str]:
     return parts[-2], parts[-1].removesuffix(".git")
 
 
+def authed_clone_url(repo_url: str, token: str | None) -> str:
+    """Embed a token into an https GitHub URL so private repos clone non-interactively.
+
+    Returns the URL unchanged when no token is set or it isn't an https github.com
+    URL. Keep the original (token-free) URL for any logging — never print the result.
+    """
+    prefix = "https://github.com/"
+    if token and repo_url.startswith(prefix):
+        return f"https://x-access-token:{token}@github.com/{repo_url[len(prefix):]}"
+    return repo_url
+
+
 def get_latest_sha(owner: str, repo: str, token: str | None) -> str:
     """Return the SHA of the latest commit on the default branch."""
     data = github_api(f"/repos/{owner}/{repo}/commits?per_page=1", token)

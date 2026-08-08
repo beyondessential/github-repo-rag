@@ -37,6 +37,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 from rag.db import get_conn, register_namespace, sanitise_namespace, setup_db, setup_meta_table, upsert_chunks
+from rag.github import authed_clone_url
 from rag.query import embed_batch
 
 # ── Skip rules ────────────────────────────────────────────────────────────────
@@ -243,12 +244,13 @@ def main() -> None:
         clone_cmd = ["git", "clone", "--depth=1"]
         if args.ref:
             clone_cmd += ["--branch", args.ref]
+        token = os.environ.get("GITHUB_TOKEN")
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = os.path.join(tmpdir, "repo")
             ref_label = args.ref or "default branch"
             print(f"Cloning {args.repo} @ {ref_label} (shallow)...")
             subprocess.run(
-                clone_cmd + [args.repo, repo_path],
+                clone_cmd + [authed_clone_url(args.repo, token), repo_path],
                 check=True,
             )
             ingest(repo_path, args.namespace, repo_url=args.repo)

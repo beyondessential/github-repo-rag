@@ -36,17 +36,20 @@ from rag.db import (
     update_namespace_sha,
     upsert_chunks,
 )
-from rag.github import get_changed_files, get_latest_sha, parse_repo_url
+from rag.github import authed_clone_url, get_changed_files, get_latest_sha, parse_repo_url
 from rag.query import embed_batch
 from scripts.ingest import EMBED_BATCH, chunk_file, ingest, should_skip
 
 
-def _full_reindex(repo_url: str, namespace: str) -> None:
+def _full_reindex(repo_url: str, namespace: str, token: str | None) -> None:
     """Clone and fully reindex. Caller updates the commit SHA afterwards."""
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = os.path.join(tmpdir, "repo")
         print(f"  Cloning {repo_url} (shallow)...")
-        subprocess.run(["git", "clone", "--depth=1", repo_url, repo_path], check=True)
+        subprocess.run(
+            ["git", "clone", "--depth=1", authed_clone_url(repo_url, token), repo_path],
+            check=True,
+        )
         ingest(repo_path, namespace)  # repo_url omitted — caller handles SHA registration
 
 
@@ -65,7 +68,7 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
     # No previous SHA recorded — do a full reindex to establish a baseline
     if last_sha is None:
         print(f"[{namespace}] No baseline commit — running full reindex")
-        _full_reindex(repo_url, namespace)
+        _full_reindex(repo_url, namespace, token)
         register_namespace(conn, namespace, repo_url, latest_sha)
         return
 
@@ -74,7 +77,7 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
 
     if too_large:
         print(f"[{namespace}] Diff too large — falling back to full reindex")
-        _full_reindex(repo_url, namespace)
+        _full_reindex(repo_url, namespace, token)
         update_namespace_sha(conn, namespace, latest_sha)
         return
 
@@ -103,7 +106,10 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = os.path.join(tmpdir, "repo")
         print(f"  Cloning {repo_url} (shallow)...")
-        subprocess.run(["git", "clone", "--depth=1", repo_url, repo_path], check=True)
+        subprocess.run(
+            ["git", "clone", "--depth=1", authed_clone_url(repo_url, token), repo_path],
+            check=True,
+        )
         repo_root = Path(repo_path)
 
         for rel_path in changed:
