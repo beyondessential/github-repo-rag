@@ -39,7 +39,7 @@ def _build_mcp(host: str, port: int, with_auth: bool):
             RevocationOptions,
         )
 
-        from rag.oauth_proxy import GoogleOAuthProxyProvider
+        from bes_mcp_oauth import GoogleOAuthProxyProvider
 
         allowed_domain = os.environ.get("GOOGLE_ALLOWED_DOMAIN", "")
         allowed_emails = [
