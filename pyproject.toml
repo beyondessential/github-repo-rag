@@ -10,6 +10,8 @@ dependencies = [
     "langchain-text-splitters>=0.3.0",
     "python-dotenv>=1.0.0",
     "mcp>=1.0.0,<2",  # 2.x removed mcp.server.fastmcp (breaking); stay on 1.x
+    # Shared Google OAuth proxy (one source of truth across BES MCP servers).
+    "bes-mcp-oauth @ git+https://github.com/beyondessential/bes-mcp-oauth@v0.1.0",
 ]
 
 [project.optional-dependencies]

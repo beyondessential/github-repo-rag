@@ -208,6 +208,15 @@ wheels = [
 ]
 
 [[package]]
+name = "bes-mcp-oauth"
+version = "0.1.0"
+source = { git = "https://github.com/beyondessential/bes-mcp-oauth?rev=v0.1.0#df9cd055911d0c9320eb691fdae8aff5c1771caa" }
+dependencies = [
+    { name = "httpx" },
+    { name = "mcp" },
+]
+
+[[package]]
 name = "certifi"
 version = "2026.7.22"
 source = { registry = "https://pypi.org/simple" }
@@ -611,6 +620,7 @@ name = "github-repo-rag"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "bes-mcp-oauth" },
     { name = "langchain-text-splitters" },
     { name = "mcp" },
     { name = "pgvector" },
@@ -627,6 +637,7 @@ ask = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'ask'", specifier = ">=0.40.0" },
+    { name = "bes-mcp-oauth", git = "https://github.com/beyondessential/bes-mcp-oauth?rev=v0.1.0" },
     { name = "langchain-text-splitters", specifier = ">=0.3.0" },
     { name = "mcp", specifier = ">=1.0.0,<2" },
     { name = "pgvector", specifier = ">=0.3.0" },
