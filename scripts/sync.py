@@ -4,7 +4,9 @@ Incremental sync: for each registered namespace, check whether new commits have
 landed since the last index and re-embed only the changed files.
 
 Falls back to a full reindex when the diff exceeds GitHub's compare API limits
-(> 250 commits or >= 300 files changed).
+(> 250 commits or >= 300 files changed). A large full reindex is submitted to the
+Voyage Batch API and finished by a later run once the batch completes
+(specs/pipelines/batch-embedding.md).
 
 Usage:
     python scripts/sync.py                     # sync all registered namespaces
@@ -13,6 +15,7 @@ Usage:
 Environment variables:
     DATABASE_URL   — PostgreSQL connection string
     VOYAGE_API_KEY — Voyage AI API key
+    VOYAGE_BATCH_THRESHOLD — new texts before a full reindex uses the Voyage Batch API (default 2000)
     GITHUB_TOKEN   — GitHub API token (optional; raises rate limit from 60 to 5000 req/hr)
 """
 
@@ -26,9 +29,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+from rag import voyage_batch
 from rag.db import (
+    cache_embeddings,
+    delete_cached_embeddings,
+    delete_pending_batches,
     get_conn,
     get_namespaces,
+    get_pending_batches,
+    purge_stale_cache,
     register_namespace,
     setup_db,
     setup_meta_table,
@@ -38,13 +47,47 @@ from rag.github import get_changed_files, get_latest_sha, parse_repo_url, shallo
 from scripts.ingest import ingest, replace_file_chunks
 
 
-def _full_reindex(repo_url: str, namespace: str, token: str | None) -> None:
-    """Clone and fully reindex. Caller updates the commit SHA afterwards."""
+def _full_reindex(repo_url: str, namespace: str, token: str | None, use_batch: bool = True) -> bool:
+    """Clone and fully reindex. Returns False if a Voyage batch was submitted instead.
+
+    Caller updates the commit SHA afterwards, only when this returns True.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = os.path.join(tmpdir, "repo")
         print(f"  Cloning {repo_url} (shallow)...")
         shallow_clone(repo_url, repo_path, token)
-        ingest(repo_path, namespace)  # repo_url omitted — caller handles SHA registration
+        # repo_url omitted — caller handles SHA registration
+        return ingest(repo_path, namespace, use_batch=use_batch)
+
+
+def _collect_batches(conn, namespace: str, batch_ids: list[str]) -> bool:
+    """Load finished batch output into the embedding cache. Returns False while any batch is in flight."""
+    batches = [voyage_batch.get_batch(b) for b in batch_ids]
+
+    # BL-006: wait for every batch in the namespace to finish
+    in_flight = [b for b in batches if b["status"] in voyage_batch.IN_FLIGHT]
+    if in_flight:
+        for b in in_flight:
+            counts = b.get("request_counts") or {}
+            progress = f"{counts.get('completed', 0)}/{counts.get('total', '?')}"
+            print(f"[{namespace}] Batch {b['id']} {b['status']} ({progress})")
+        return False
+
+    failed = []
+    for b in batches:
+        if b.get("output_file_id"):
+            rows = list(voyage_batch.iter_output_embeddings(b["output_file_id"]))
+            cache_embeddings(conn, b["id"], rows)
+            print(f"[{namespace}] Batch {b['id']} {b['status']}: cached {len(rows)} embeddings")
+        if b["status"] in voyage_batch.FAILED:
+            failed.append(b)
+
+    # BL-009: drop failed batches and fail the sync; the next run resubmits what isn't cached
+    if failed:
+        delete_pending_batches(conn, [b["id"] for b in failed])
+        detail = ", ".join(f"{b['id']} ({b['status']}: {b.get('errors')})" for b in failed)
+        raise RuntimeError(f"Voyage batch failed: {detail}")
+    return True
 
 
 def sync_namespace(conn, ns: dict, token: str | None) -> None:
@@ -55,6 +98,20 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
     owner, repo = parse_repo_url(repo_url)
     latest_sha = get_latest_sha(owner, repo, token)
 
+    batch_ids = get_pending_batches(conn, namespace)
+    if batch_ids:
+        if not _collect_batches(conn, namespace, batch_ids):
+            return
+        # BL-007: real-time full reindex, reading batch results from the cache
+        print(f"[{namespace}] Batches complete — running full reindex from cache")
+        _full_reindex(repo_url, namespace, token, use_batch=False)
+        # BL-008
+        register_namespace(conn, namespace, repo_url, latest_sha)
+        delete_pending_batches(conn, batch_ids)
+        delete_cached_embeddings(conn, batch_ids)
+        print(f"[{namespace}] Sync complete → {latest_sha[:8]}")
+        return
+
     if latest_sha == last_sha:
         print(f"[{namespace}] Up to date ({latest_sha[:8]})")
         return
@@ -62,8 +119,8 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
     # No previous SHA recorded — do a full reindex to establish a baseline
     if last_sha is None:
         print(f"[{namespace}] No baseline commit — running full reindex")
-        _full_reindex(repo_url, namespace, token)
-        register_namespace(conn, namespace, repo_url, latest_sha)
+        if _full_reindex(repo_url, namespace, token):
+            register_namespace(conn, namespace, repo_url, latest_sha)
         return
 
     print(f"[{namespace}] New commits {last_sha[:8]}...{latest_sha[:8]}, checking diff...")
@@ -71,8 +128,8 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
 
     if too_large:
         print(f"[{namespace}] Diff too large — falling back to full reindex")
-        _full_reindex(repo_url, namespace, token)
-        update_namespace_sha(conn, namespace, latest_sha)
+        if _full_reindex(repo_url, namespace, token):
+            update_namespace_sha(conn, namespace, latest_sha)
         return
 
     print(f"[{namespace}] {len(changed)} changed, {len(deleted)} deleted files")
@@ -107,6 +164,10 @@ def main() -> None:
     token = os.environ.get("GITHUB_TOKEN")
     conn = get_conn(os.environ["DATABASE_URL"])
     setup_meta_table(conn)
+    # BL-010
+    purged = purge_stale_cache(conn)
+    if purged:
+        print(f"Purged {purged} stale batch embeddings")
 
     namespaces = get_namespaces(conn)
 

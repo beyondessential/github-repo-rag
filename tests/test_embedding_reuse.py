@@ -29,6 +29,7 @@ def voyage(monkeypatch):
         return [[float(len(t))] for t in texts]
 
     monkeypatch.setattr(ingest, "embed_batch", fake_embed_batch)
+    monkeypatch.setattr(ingest, "get_cached_embeddings", lambda conn, hashes: {})
     return calls
 
 
@@ -93,3 +94,12 @@ def test_replace_leaves_index_untouched_when_embedding_fails(monkeypatch, tmp_pa
     with pytest.raises(RuntimeError):
         ingest.replace_file_chunks(FakeConn(), "ns", tmp_path, ["a.py"], [])
     assert deletes == []
+
+
+def test_uses_batch_cache_for_texts_not_in_table(monkeypatch, voyage):
+    monkeypatch.setattr(ingest, "get_embeddings_by_hash", lambda conn, table, hashes: {})
+    monkeypatch.setattr(ingest, "get_cached_embeddings", lambda conn, hashes: {
+        h: [7.0] for h in hashes if h == content_hash("cached")
+    })
+    assert ingest.embed_chunks(FakeConn(), "ns_code", [_chunk("cached"), _chunk("fresh")]) == [[7.0], [5.0]]
+    assert voyage == [["fresh"]]

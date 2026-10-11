@@ -36,11 +36,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+from rag import voyage_batch
 from rag.db import (
+    add_pending_batch,
     content_hash,
     delete_file_chunks,
+    get_cached_embeddings,
     get_conn,
     get_embeddings_by_hash,
+    get_existing_hashes,
     register_namespace,
     sanitise_namespace,
     setup_db,
@@ -76,6 +80,7 @@ DOC_CHUNK_OVERLAP = 400
 
 EMBED_BATCH = 64  # texts per voyage API call
 INDEX_GROUP = 1000  # chunks per hash lookup + upsert during a full ingest
+DEFAULT_BATCH_THRESHOLD = 2000  # new texts before a full reindex goes via the Voyage Batch API
 
 _LANG_MAP = {
     ".ts": Language.TS, ".tsx": Language.TS,
@@ -177,6 +182,8 @@ def embed_chunks(conn, table: str, chunks: list[dict]) -> list[list[float]]:
     """
     hashes = [content_hash(c["text"]) for c in chunks]
     known = get_embeddings_by_hash(conn, table, sorted(set(hashes)))
+    # BL-007: results of a collected Voyage batch
+    known.update(get_cached_embeddings(conn, sorted(set(hashes) - known.keys())))
 
     pending: dict[str, str] = {}
     for h, c in zip(hashes, chunks, strict=True):
@@ -239,9 +246,46 @@ def replace_file_chunks(
     print(f"  Removed {total_deleted} stale chunks, upserted {len(all_chunks)}")
 
 
+# ── Voyage Batch API ──────────────────────────────────────────────────────────
+
+def batch_threshold() -> int:
+    raw = os.environ.get("VOYAGE_BATCH_THRESHOLD", "")
+    if not raw:
+        return DEFAULT_BATCH_THRESHOLD
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(f"VOYAGE_BATCH_THRESHOLD must be an integer, got {raw!r}") from None
+
+
+def pending_texts(conn, tables: list[str], chunks: list[dict]) -> dict[str, str]:
+    """Return {content_hash: text} for chunk texts with no stored or cached embedding."""
+    by_hash = {content_hash(c["text"]): c["text"] for c in chunks}
+    hashes = list(by_hash)
+    existing: set[str] = set()
+    for i in range(0, len(hashes), INDEX_GROUP * 10):
+        existing |= get_existing_hashes(conn, tables, hashes[i:i + INDEX_GROUP * 10])
+    return {h: t for h, t in by_hash.items() if h not in existing}
+
+
+def submit_batches(conn, namespace: str, texts: dict[str, str]) -> list[str]:
+    """Submit texts to the Voyage Batch API and record each batch against the namespace."""
+    batch_ids = []
+    files = voyage_batch.build_input_files(texts)
+    for n, content in enumerate(files, 1):
+        file_id = voyage_batch.upload_file(content, f"{namespace}-{n}.jsonl")
+        batch = voyage_batch.create_batch(file_id, metadata={"namespace": namespace})
+        # BL-005: record the batch; chunks and last_commit_sha are left as they are
+        add_pending_batch(conn, batch["id"], namespace)
+        batch_ids.append(batch["id"])
+        print(f"  Submitted batch {n}/{len(files)}: {batch['id']}")
+    return batch_ids
+
+
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
-def ingest(repo_path: str, namespace: str, repo_url: str | None = None) -> None:
+def ingest(repo_path: str, namespace: str, repo_url: str | None = None, use_batch: bool = False) -> bool:
+    """Index every file in the repo. Returns False if embedding was handed to the Voyage Batch API."""
     namespace = sanitise_namespace(namespace)
     code_table = f"{namespace}_code"
     docs_table = f"{namespace}_docs"
@@ -269,6 +313,20 @@ def ingest(repo_path: str, namespace: str, repo_url: str | None = None) -> None:
     doc_chunks = [c for c in all_chunks if c["table"] == docs_table]
     print(f"Total: {len(all_chunks)} chunks ({len(code_chunks)} code, {len(doc_chunks)} docs)")
 
+    # BL-001 / BL-002: large full reindexes go via the Batch API
+    if use_batch:
+        texts = pending_texts(conn, tables, all_chunks)
+        threshold = batch_threshold()
+        print(f"{len(texts)} distinct texts need embedding (batch threshold {threshold})")
+        if len(texts) >= threshold:
+            submit_batches(conn, namespace, texts)
+            if repo_url:
+                # No SHA, so the next sync collects the batch and does the full reindex
+                register_namespace(conn, namespace, repo_url, None)
+            conn.close()
+            print("\nBatch submitted — scripts/sync.py will finish indexing once Voyage completes it.")
+            return False
+
     for table, chunks in [(code_table, code_chunks), (docs_table, doc_chunks)]:
         if not chunks:
             continue
@@ -287,6 +345,7 @@ def ingest(repo_path: str, namespace: str, repo_url: str | None = None) -> None:
 
     conn.close()
     print("\nIngestion complete.")
+    return True
 
 
 def main() -> None:
@@ -307,10 +366,19 @@ def main() -> None:
         "--ref", default=None,
         help="Branch name or release tag to index (e.g. 2.50.5, v2.51.3, main). Defaults to the repo's default branch.",
     )
+    parser.add_argument(
+        "--batch", action="store_true",
+        help="Embed via the Voyage Batch API (33%% cheaper, up to 12 h) when enough text is new; "
+             "scripts/sync.py finishes the index. Requires --repo, not --ref.",
+    )
     args = parser.parse_args()
 
+    if args.batch and (not args.repo or args.ref):
+        # sync.py collects the batch by re-cloning the registered repo's default branch
+        parser.error("--batch requires --repo and cannot be combined with --ref")
+
     if args.repo_path:
-        ingest(args.repo_path, args.namespace, repo_url=args.repo)
+        ingest(args.repo_path, args.namespace, repo_url=args.repo, use_batch=args.batch)
     else:
         if not args.repo:
             parser.error("--repo URL is required when no local repo_path is given")
@@ -319,7 +387,7 @@ def main() -> None:
             ref_label = args.ref or "default branch"
             print(f"Cloning {args.repo} @ {ref_label} (shallow)...")
             shallow_clone(args.repo, repo_path, os.environ.get("GITHUB_TOKEN"), ref=args.ref)
-            ingest(repo_path, args.namespace, repo_url=args.repo)
+            ingest(repo_path, args.namespace, repo_url=args.repo, use_batch=args.batch)
 
 
 if __name__ == "__main__":

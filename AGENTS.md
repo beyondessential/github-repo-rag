@@ -21,6 +21,7 @@ The MCP server does **retrieval only** — it never calls an LLM. The calling ag
 - `mcp_server.py` — FastMCP server; exposes `search_codebase`, `get_file`, `list_files`, `get_repo_structure`, `list_namespaces`, `namespace_info` tools
 - `rag/query.py` — `embed()` and `retrieve()` (hybrid pgvector search)
 - `rag/db.py` — DB setup and upsert helpers
+- `rag/voyage_batch.py` — Voyage Batch API REST client used for large full reindexes (`specs/pipelines/batch-embedding.md`)
 - `rag/auth.py` — Google OAuth token verifier for HTTP transport
 - `scripts/ingest.py` — ingest a repo into pgvector
 - `scripts/ask.py` — local CLI for full retrieve + answer pipeline (uses Anthropic API; dev convenience only)
@@ -41,6 +42,7 @@ Each indexed repo gets a namespace (e.g. `tupaia`), creating `{namespace}_code` 
 |---|---|
 | `DATABASE_URL` | All DB operations |
 | `VOYAGE_API_KEY` | Embedding (ingest + query) |
+| `VOYAGE_BATCH_THRESHOLD` | Sync / `ingest.py --batch` — new texts before a full reindex uses the Batch API (default 2000) |
 | `ANTHROPIC_API_KEY` | `scripts/ask.py` only — not required for MCP |
 | `GOOGLE_ALLOWED_DOMAIN` / `GOOGLE_ALLOWED_EMAILS` | HTTP transport auth (optional) |
 

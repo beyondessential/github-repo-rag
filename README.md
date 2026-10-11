@@ -249,6 +249,12 @@ In production this runs on a schedule via a Railway cron service — see [Deploy
 
 Each chunk stores a SHA-256 `content_hash` of its text. Before calling Voyage, every ingest, sync and reindex looks up existing embeddings by hash and only embeds text the namespace hasn't seen; identical chunks within a run are embedded once. An incremental sync embeds everything first, then swaps the old chunks for the new in a single transaction, so a Voyage failure leaves the index as it was. Tables created before this column existed are backfilled the first time they are set up again.
 
+### Voyage Batch API for full reindexes
+
+A full reindex (no baseline SHA, or a diff too large for GitHub's compare API) with at least `VOYAGE_BATCH_THRESHOLD` (default 2000) new texts goes through the [Voyage Batch API](https://docs.voyageai.com/docs/batch-inference), which costs 33% less and finishes within 12 hours. That sync run submits the batch and leaves the namespace as it is. Later runs skip the namespace while the batch is in flight, then load the results into `rag_embedding_cache` and do the full reindex from the cache. Incremental syncs always embed in real time. Spec: [specs/pipelines/batch-embedding.md](specs/pipelines/batch-embedding.md).
+
+To index a new repo the same way, run `ingest.py --repo <url> --batch` (it can't be combined with `--ref`). The next scheduled sync after Voyage finishes completes the index. Set `VOYAGE_BATCH_THRESHOLD` to a very large number to turn batching off.
+
 Two lower-level scripts back this:
 - `scripts/register.py` — register (or re-register) a namespace's baseline commit SHA without re-ingesting. Useful after a manual `ingest.py` run, or to clear the SHA and force a full reindex on the next sync.
 - `scripts/reindex.py` — re-embed an explicit set of changed/deleted files, given as `CHANGED_FILES` / `DELETED_FILES` (space-separated repo-relative paths). This is the primitive `sync.py` builds on; call it directly only if you already know exactly which files changed.

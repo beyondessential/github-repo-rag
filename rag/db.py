@@ -99,6 +99,19 @@ def get_embeddings_by_hash(conn, table: str, hashes: list[str]) -> dict[str, lis
         return {h: emb for h, emb in cur.fetchall()}
 
 
+def get_existing_hashes(conn, tables: list[str], hashes: list[str]) -> set[str]:
+    """Return the hashes that already have an embedding in any of the tables or the batch cache."""
+    found: set[str] = set()
+    with conn.cursor() as cur:
+        for table in [*tables, "rag_embedding_cache"]:
+            cur.execute(
+                f"SELECT DISTINCT content_hash FROM {table} WHERE content_hash = ANY(%s)",
+                (list(hashes),),
+            )
+            found.update(r[0] for r in cur.fetchall())
+    return found
+
+
 def upsert_chunks(
     conn, table: str, chunks: list[dict], embeddings: list[list[float]], commit: bool = True
 ) -> None:
@@ -156,6 +169,23 @@ def setup_meta_table(conn) -> None:
                 last_indexed_at  TIMESTAMPTZ
             )
         """)
+        # Voyage Batch API state — see specs/pipelines/batch-embedding.md
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rag_pending_batches (
+                batch_id    TEXT PRIMARY KEY,
+                namespace   TEXT NOT NULL,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS rag_embedding_cache (
+                content_hash  TEXT PRIMARY KEY,
+                embedding     vector(1024) NOT NULL,
+                batch_id      TEXT NOT NULL,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
     conn.commit()
 
 
@@ -198,3 +228,78 @@ def update_namespace_sha(conn, namespace: str, commit_sha: str) -> None:
             (commit_sha, namespace),
         )
     conn.commit()
+
+
+# ── Batch embedding state ─────────────────────────────────────────────────────
+
+def add_pending_batch(conn, batch_id: str, namespace: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO rag_pending_batches (batch_id, namespace) VALUES (%s, %s)",
+            (batch_id, namespace),
+        )
+    conn.commit()
+
+
+def get_pending_batches(conn, namespace: str) -> list[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT batch_id FROM rag_pending_batches WHERE namespace = %s ORDER BY created_at",
+            (namespace,),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def delete_pending_batches(conn, batch_ids: list[str]) -> None:
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM rag_pending_batches WHERE batch_id = ANY(%s)", (batch_ids,))
+    conn.commit()
+
+
+def cache_embeddings(conn, batch_id: str, rows: list[tuple[str, list[float]]]) -> None:
+    """Store (content_hash, embedding) pairs from a batch output."""
+    if not rows:
+        return
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO rag_embedding_cache (content_hash, embedding, batch_id)
+            VALUES %s
+            ON CONFLICT (content_hash) DO UPDATE SET
+                embedding = EXCLUDED.embedding,
+                batch_id = EXCLUDED.batch_id,
+                created_at = NOW()
+            """,
+            [(h, emb, batch_id) for h, emb in rows],
+            template="(%s, %s::vector, %s)",
+        )
+    conn.commit()
+
+
+def get_cached_embeddings(conn, hashes: list[str]) -> dict[str, list[float]]:
+    if not hashes:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT content_hash, embedding FROM rag_embedding_cache WHERE content_hash = ANY(%s)",
+            (list(hashes),),
+        )
+        return {h: emb for h, emb in cur.fetchall()}
+
+
+def delete_cached_embeddings(conn, batch_ids: list[str]) -> None:
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM rag_embedding_cache WHERE batch_id = ANY(%s)", (batch_ids,))
+    conn.commit()
+
+
+def purge_stale_cache(conn, max_age_days: int = 7) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM rag_embedding_cache WHERE created_at < NOW() - make_interval(days => %s)",
+            (max_age_days,),
+        )
+        n = cur.rowcount
+    conn.commit()
+    return n
