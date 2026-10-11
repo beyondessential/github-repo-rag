@@ -17,6 +17,14 @@ def sanitise_namespace(namespace: str) -> str:
     return re.sub(r"[^a-z0-9_]", "_", namespace.lower())
 
 
+# BL-011: must produce the same digest as content_hash()
+BACKFILL_HASH_SQL = """
+    UPDATE {table}
+    SET content_hash = encode(sha256(convert_to(text, 'UTF8')), 'hex')
+    WHERE content_hash IS NULL
+"""
+
+
 def get_conn(database_url: str):
     """Open a psycopg2 connection with pgvector registered."""
     conn = psycopg2.connect(database_url)
@@ -48,11 +56,7 @@ def setup_table(conn, table: str) -> None:
             ALTER TABLE {table}
             ADD COLUMN IF NOT EXISTS content_hash TEXT
         """)
-        cur.execute(f"""
-            UPDATE {table}
-            SET content_hash = encode(sha256(convert_to(text, 'UTF8')), 'hex')
-            WHERE content_hash IS NULL
-        """)
+        cur.execute(BACKFILL_HASH_SQL.format(table=table))
         cur.execute(f"""
             CREATE INDEX IF NOT EXISTS {table}_embedding_idx
             ON {table} USING hnsw (embedding vector_cosine_ops)
@@ -78,6 +82,7 @@ def setup_db(conn, tables: list[str]) -> None:
         setup_table(conn, table)
 
 
+# BL-011
 def content_hash(text: str) -> str:
     """SHA-256 hex digest of a chunk's text, matching the SQL backfill in setup_table()."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -180,7 +185,7 @@ def setup_meta_table(conn) -> None:
                 last_indexed_at  TIMESTAMPTZ
             )
         """)
-        # Voyage Batch API state — see specs/pipelines/batch-embedding.md
+        # Voyage Batch API state — see specs/pipelines/embedding-sync.md
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rag_pending_batches (

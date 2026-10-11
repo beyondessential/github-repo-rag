@@ -38,7 +38,7 @@ def _chunk(text: str, file_path: str = "a.py", i: int = 0) -> dict:
             "table": "ns_code"}
 
 
-def test_reuses_stored_embeddings_and_dedupes_within_run(monkeypatch, voyage):
+def test_ac_009_reuses_stored_embeddings_and_dedupes_within_run(monkeypatch, voyage):
     stored = {content_hash("old"): [99.0]}
     monkeypatch.setattr(ingest, "get_embeddings_by_hash", lambda conn, table, hashes: {
         h: stored[h] for h in hashes if h in stored
@@ -51,7 +51,7 @@ def test_reuses_stored_embeddings_and_dedupes_within_run(monkeypatch, voyage):
     assert result == [[99.0], [3.0], [3.0], [5.0]]
 
 
-def test_no_voyage_call_when_everything_is_stored(monkeypatch, voyage):
+def test_ac_009_no_voyage_call_when_everything_is_stored(monkeypatch, voyage):
     monkeypatch.setattr(ingest, "get_embeddings_by_hash", lambda conn, table, hashes: {h: [1.0] for h in hashes})
     assert ingest.embed_chunks(FakeConn(), "ns_code", [_chunk("a"), _chunk("b")]) == [[1.0], [1.0]]
     assert voyage == []
@@ -64,7 +64,7 @@ def test_splits_new_texts_into_voyage_sized_batches(monkeypatch, voyage):
     assert [len(c) for c in voyage] == [ingest.EMBED_BATCH, 1]
 
 
-def test_replace_embeds_before_deleting_and_commits_once(monkeypatch, tmp_path: Path):
+def test_ac_011_replace_embeds_before_deleting_and_commits_once(monkeypatch, tmp_path: Path):
     (tmp_path / "a.py").write_text("print('hi')\n", encoding="utf-8")
     events: list[str] = []
     monkeypatch.setattr(ingest, "embed_chunks", lambda conn, table, chunks: events.append("embed") or
@@ -81,7 +81,7 @@ def test_replace_embeds_before_deleting_and_commits_once(monkeypatch, tmp_path: 
     assert conn.commits == 1
 
 
-def test_replace_leaves_index_untouched_when_embedding_fails(monkeypatch, tmp_path: Path):
+def test_ac_011_replace_leaves_index_untouched_when_embedding_fails(monkeypatch, tmp_path: Path):
     (tmp_path / "a.py").write_text("print('hi')\n", encoding="utf-8")
 
     def boom(conn, table, chunks):
@@ -96,7 +96,7 @@ def test_replace_leaves_index_untouched_when_embedding_fails(monkeypatch, tmp_pa
     assert deletes == []
 
 
-def test_uses_batch_cache_for_texts_not_in_table(monkeypatch, voyage):
+def test_ac_009_uses_batch_cache_for_texts_not_in_table(monkeypatch, voyage):
     monkeypatch.setattr(ingest, "get_embeddings_by_hash", lambda conn, table, hashes: {})
     monkeypatch.setattr(ingest, "get_cached_embeddings", lambda conn, hashes: {
         h: [7.0] for h in hashes if h == content_hash("cached")

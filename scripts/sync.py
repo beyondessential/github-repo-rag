@@ -6,7 +6,7 @@ landed since the last index and re-embed only the changed files.
 Falls back to a full reindex when the diff exceeds GitHub's compare API limits
 (> 250 commits or >= 300 files changed). A large full reindex is submitted to the
 Voyage Batch API and finished by a later run once the batch completes
-(specs/pipelines/batch-embedding.md).
+(specs/pipelines/embedding-sync.md).
 
 Usage:
     python scripts/sync.py                     # sync all registered namespaces
@@ -82,9 +82,10 @@ def _collect_batches(conn, namespace: str, batch_ids: list[str]) -> bool:
         if b["status"] in voyage_batch.FAILED:
             failed.append(b)
 
-    # BL-009: drop failed batches and fail the sync; the next run resubmits what isn't cached
+    # BL-009: drop every pending row (completed output stays cached) so the next run's full
+    # reindex resubmits only the uncached texts instead of embedding them in real time
     if failed:
-        delete_pending_batches(conn, [b["id"] for b in failed])
+        delete_pending_batches(conn, batch_ids)
         detail = ", ".join(f"{b['id']} ({b['status']}: {b.get('errors')})" for b in failed)
         raise RuntimeError(f"Voyage batch failed: {detail}")
     return True
@@ -105,7 +106,7 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
         # BL-007: real-time full reindex, reading batch results from the cache
         print(f"[{namespace}] Batches complete — running full reindex from cache")
         _full_reindex(repo_url, namespace, token, use_batch=False)
-        # BL-008
+        # BL-008: advance the SHA, then clear batch state
         register_namespace(conn, namespace, repo_url, latest_sha)
         delete_pending_batches(conn, batch_ids)
         delete_cached_embeddings(conn, batch_ids)
@@ -164,7 +165,7 @@ def main() -> None:
     token = os.environ.get("GITHUB_TOKEN")
     conn = get_conn(os.environ["DATABASE_URL"])
     setup_meta_table(conn)
-    # BL-010
+    # BL-010: drop week-old batch results
     purged = purge_stale_cache(conn)
     if purged:
         print(f"Purged {purged} stale batch embeddings")

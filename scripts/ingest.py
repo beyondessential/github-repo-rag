@@ -182,10 +182,12 @@ def embed_chunks(conn, table: str, chunks: list[dict]) -> list[list[float]]:
     Identical texts within `chunks` are embedded once.
     """
     hashes = [content_hash(c["text"]) for c in chunks]
+    # BL-011: reuse stored embeddings
     known = get_embeddings_by_hash(conn, table, sorted(set(hashes)))
     # BL-007: results of a collected Voyage batch
     known.update(get_cached_embeddings(conn, sorted(set(hashes) - known.keys())))
 
+    # BL-012: one Voyage input per distinct text
     pending: dict[str, str] = {}
     for h, c in zip(hashes, chunks, strict=True):
         if h not in known:
@@ -231,6 +233,7 @@ def replace_file_chunks(
 
     by_table = {t: [c for c in all_chunks if c["table"] == t] for t in tables}
     print(f"  New chunks: {len(all_chunks)} ({len(by_table[code_table])} code, {len(by_table[docs_table])} docs)")
+    # BL-013: embed first, then swap in one transaction
     embeddings = {t: embed_chunks(conn, t, chunks) for t, chunks in by_table.items() if chunks}
 
     try:
@@ -314,11 +317,12 @@ def ingest(repo_path: str, namespace: str, repo_url: str | None = None, use_batc
     doc_chunks = [c for c in all_chunks if c["table"] == docs_table]
     print(f"Total: {len(all_chunks)} chunks ({len(code_chunks)} code, {len(doc_chunks)} docs)")
     if not all_chunks:
-        # Guards the stale-chunk delete below from wiping the index after a bad checkout
+        # BL-015: guards the stale-chunk delete below from wiping the index after a bad checkout
         conn.close()
         raise RuntimeError(f"No indexable files found in {repo_root} — refusing to reindex '{namespace}'")
 
-    # BL-001 / BL-002: large full reindexes go via the Batch API
+    # BL-001: only full reindexes reach here with use_batch
+    # BL-002: large ones go via the Batch API
     if use_batch:
         texts = pending_texts(conn, tables, all_chunks)
         threshold = batch_threshold()
@@ -338,7 +342,7 @@ def ingest(repo_path: str, namespace: str, repo_url: str | None = None, use_batc
         print(f"\nUpserting {len(chunks)} chunks to {table}...")
         index_chunks(conn, table, chunks)
 
-    # Only after every upsert succeeded: drop chunks for removed or newly skipped files
+    # BL-014: only after every upsert succeeded, drop chunks for removed or newly skipped files
     # and chunk indexes past a file's new chunk count
     for table, chunks in [(code_table, code_chunks), (docs_table, doc_chunks)]:
         n = delete_chunks_except(conn, table, [c["id"] for c in chunks])

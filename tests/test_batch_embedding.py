@@ -1,4 +1,4 @@
-"""Voyage Batch API flow — specs/pipelines/batch-embedding.md. DB, Voyage and git are faked."""
+"""Voyage Batch API flow — specs/pipelines/embedding-sync.md. DB, Voyage and git are faked."""
 
 import json
 from pathlib import Path
@@ -72,19 +72,19 @@ def test_ac_002_batching_off_by_default(monkeypatch, repo, db):
     assert db["batches"] == []
 
 
-def test_full_reindex_prunes_stale_chunks_after_all_upserts(monkeypatch, repo, db):
+def test_ac_012_full_reindex_prunes_stale_chunks_after_all_upserts(monkeypatch, repo, db):
     (repo / "README.md").write_text("# Docs\n", encoding="utf-8")
     assert ingest.ingest(str(repo), "ns") is True
     assert db["events"] == ["upsert:ns_code", "upsert:ns_docs", "prune:ns_code:5", "prune:ns_docs:1"]
 
 
-def test_submitted_batch_prunes_nothing(monkeypatch, repo, db):
+def test_ac_012_submitted_batch_prunes_nothing(monkeypatch, repo, db):
     monkeypatch.setenv("VOYAGE_BATCH_THRESHOLD", "1")
     assert ingest.ingest(str(repo), "ns", repo_url="https://github.com/o/r", use_batch=True) is False
     assert db["events"] == []
 
 
-def test_empty_checkout_refuses_to_reindex(tmp_path, db):
+def test_ac_013_empty_checkout_refuses_to_reindex(tmp_path, db):
     with pytest.raises(RuntimeError, match="No indexable files"):
         ingest.ingest(str(tmp_path), "ns")
     assert db["events"] == []
@@ -145,11 +145,18 @@ def test_ac_005_collects_completed_batch_then_reindexes_from_cache(monkeypatch, 
     assert sync_env["deleted"] == [["batch-1"]] and sync_env["cleared"] == [["batch-1"]]
 
 
-def test_ac_006_failed_batch_is_dropped_and_sync_raises(monkeypatch, sync_env):
-    monkeypatch.setattr(voyage_batch, "get_batch", lambda b: {"id": b, "status": "failed", "errors": "bad"})
-    with pytest.raises(RuntimeError, match="batch-1"):
+def test_ac_006_failed_batch_drops_all_pending_rows_and_sync_raises(monkeypatch, sync_env):
+    monkeypatch.setattr(sync, "get_pending_batches", lambda conn, ns: ["batch-1", "batch-2"])
+    statuses = {
+        "batch-1": {"id": "batch-1", "status": "completed", "output_file_id": "out"},
+        "batch-2": {"id": "batch-2", "status": "failed", "errors": "bad"},
+    }
+    monkeypatch.setattr(voyage_batch, "get_batch", lambda b: statuses[b])
+    with pytest.raises(RuntimeError, match="batch-2"):
         sync.sync_namespace(FakeConn(), NS, None)
-    assert sync_env["deleted"] == [["batch-1"]]
+    # Completed output stays cached; every row goes so the next run resubmits the rest
+    assert sync_env["cached"] == [("batch-1", [("h1", [1.0])])]
+    assert sync_env["deleted"] == [["batch-1", "batch-2"]] and sync_env["cleared"] == []
     assert sync_env["reindex"] == [] and sync_env["registered"] == []
 
 
@@ -161,3 +168,31 @@ def test_submitted_full_reindex_does_not_advance_sha(monkeypatch, sync_env):
     monkeypatch.setattr(sync, "update_namespace_sha", lambda conn, ns, sha: advanced.append(sha))
     sync.sync_namespace(FakeConn(), NS, None)
     assert advanced == []
+
+
+# ── Voyage REST payloads ──────────────────────────────────────────────────────
+
+def test_ac_007_batch_requests_voyage_code_3_documents(monkeypatch):
+    sent = {}
+
+    def fake_request(method, path, body=None, content_type=None):
+        sent.update(method=method, path=path, payload=json.loads(body))
+        return b'{"id": "batch-1"}'
+
+    monkeypatch.setattr(voyage_batch, "_request", fake_request)
+    voyage_batch.create_batch("file-1", metadata={"namespace": "ns"})
+    assert (sent["method"], sent["path"]) == ("POST", "/batches")
+    assert sent["payload"]["endpoint"] == "/v1/embeddings"
+    assert sent["payload"]["request_params"] == {"model": "voyage-code-3", "input_type": "document"}
+    assert sent["payload"]["input_file_id"] == "file-1"
+
+
+def test_ac_008_only_successful_output_lines_are_loaded(monkeypatch):
+    def line(custom_id, status=200, error=None):
+        body = {"data": [{"embedding": [0.5], "index": 0}]} if status == 200 else {"detail": "x"}
+        return json.dumps({"custom_id": custom_id, "response": {"status_code": status, "body": body},
+                           "error": error})
+
+    output = "\n".join([line("ok"), line("bad-status", 400), line("errored", 200, {"message": "x"}), ""])
+    monkeypatch.setattr(voyage_batch, "_request", lambda method, path: output.encode())
+    assert list(voyage_batch.iter_output_embeddings("out")) == [("ok", [0.5])]

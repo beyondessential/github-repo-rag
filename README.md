@@ -251,7 +251,7 @@ Each chunk stores a SHA-256 `content_hash` of its text. Before calling Voyage, e
 
 ### Voyage Batch API for full reindexes
 
-A full reindex (no baseline SHA, or a diff too large for GitHub's compare API) with at least `VOYAGE_BATCH_THRESHOLD` (default 2000) new texts goes through the [Voyage Batch API](https://docs.voyageai.com/docs/batch-inference), which costs 33% less and finishes within 12 hours. That sync run submits the batch and leaves the namespace as it is. Later runs skip the namespace while the batch is in flight, then load the results into `rag_embedding_cache` and do the full reindex from the cache. Incremental syncs always embed in real time. Spec: [specs/pipelines/batch-embedding.md](specs/pipelines/batch-embedding.md).
+A full reindex (no baseline SHA, or a diff too large for GitHub's compare API) with at least `VOYAGE_BATCH_THRESHOLD` (default 2000) new texts goes through the [Voyage Batch API](https://docs.voyageai.com/docs/batch-inference), which costs 33% less and finishes within 12 hours. That sync run submits the batch and leaves the namespace as it is. Later runs skip the namespace while the batch is in flight, then load the results into `rag_embedding_cache` and do the full reindex from the cache. Incremental syncs always embed in real time. Spec: [specs/pipelines/embedding-sync.md](specs/pipelines/embedding-sync.md).
 
 To index a new repo the same way, run `ingest.py --repo <url> --batch` (it can't be combined with `--ref`). The next scheduled sync after Voyage finishes completes the index. Set `VOYAGE_BATCH_THRESHOLD` to a very large number to turn batching off.
 

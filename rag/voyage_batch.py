@@ -1,7 +1,7 @@
 """Voyage Batch API client (Files + Batches REST endpoints).
 
 The voyageai Python package (0.5.0) has no batch support, so this talks to the
-REST API directly. See specs/pipelines/batch-embedding.md.
+REST API directly. See specs/pipelines/embedding-sync.md.
 """
 
 import json
