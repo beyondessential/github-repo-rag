@@ -81,10 +81,21 @@ def get_batch(batch_id: str) -> dict:
     return json.loads(_request("GET", f"/batches/{batch_id}"))
 
 
+def _stream_lines(path: str) -> Iterator[bytes]:
+    """GET a file and yield it line by line without holding the whole body in memory."""
+    headers = {"Authorization": f"Bearer {os.environ['VOYAGE_API_KEY']}"}
+    req = urllib.request.Request(f"{_API}{path}", headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            yield from resp
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        raise RuntimeError(f"Voyage API {e.code} for GET {path}: {detail}") from e
+
+
 def iter_output_embeddings(output_file_id: str) -> Iterator[tuple[str, list[float]]]:
     """Yield (content_hash, embedding) for each successful line of a batch output file."""
-    content = _request("GET", f"/files/{output_file_id}/content")
-    for raw in content.splitlines():
+    for raw in _stream_lines(f"/files/{output_file_id}/content"):
         if not raw.strip():
             continue
         line = json.loads(raw)

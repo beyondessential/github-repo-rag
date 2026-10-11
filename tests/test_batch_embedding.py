@@ -194,5 +194,5 @@ def test_ac_008_only_successful_output_lines_are_loaded(monkeypatch):
                            "error": error})
 
     output = "\n".join([line("ok"), line("bad-status", 400), line("errored", 200, {"message": "x"}), ""])
-    monkeypatch.setattr(voyage_batch, "_request", lambda method, path: output.encode())
+    monkeypatch.setattr(voyage_batch, "_stream_lines", lambda path: iter(output.encode().splitlines(keepends=True)))
     assert list(voyage_batch.iter_output_embeddings("out")) == [("ok", [0.5])]

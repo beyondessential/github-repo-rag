@@ -46,6 +46,8 @@ from rag.db import (
 from rag.github import get_changed_files, get_latest_sha, parse_repo_url, shallow_clone
 from scripts.ingest import ingest, replace_file_chunks
 
+CACHE_PAGE = 1000  # batch output rows per cache insert
+
 
 def _full_reindex(repo_url: str, namespace: str, token: str | None, use_batch: bool = True) -> bool:
     """Clone and fully reindex. Returns False if a Voyage batch was submitted instead.
@@ -76,9 +78,19 @@ def _collect_batches(conn, namespace: str, batch_ids: list[str]) -> bool:
     failed = []
     for b in batches:
         if b.get("output_file_id"):
-            rows = list(voyage_batch.iter_output_embeddings(b["output_file_id"]))
-            cache_embeddings(conn, b["id"], rows)
-            print(f"[{namespace}] Batch {b['id']} {b['status']}: cached {len(rows)} embeddings")
+            # Cache in pages so a 100K-line output never sits in memory at once
+            cached = 0
+            page: list[tuple[str, list[float]]] = []
+            for row in voyage_batch.iter_output_embeddings(b["output_file_id"]):
+                page.append(row)
+                if len(page) >= CACHE_PAGE:
+                    cache_embeddings(conn, b["id"], page)
+                    cached += len(page)
+                    page = []
+            if page:
+                cache_embeddings(conn, b["id"], page)
+                cached += len(page)
+            print(f"[{namespace}] Batch {b['id']} {b['status']}: cached {cached} embeddings")
         if b["status"] in voyage_batch.FAILED:
             failed.append(b)
 
@@ -188,6 +200,8 @@ def main() -> None:
         try:
             sync_namespace(conn, ns, token)
         except Exception as e:
+            # Clear any aborted transaction so later namespaces can still use the connection
+            conn.rollback()
             print(f"[{ns['namespace']}] ERROR: {e}")
             errors.append(ns["namespace"])
 
