@@ -25,7 +25,7 @@ def repo(tmp_path: Path) -> Path:
 @pytest.fixture
 def db(monkeypatch):
     """Stub every DB call ingest() makes and record what it does."""
-    calls: dict[str, list] = {"upserts": [], "batches": [], "registered": []}
+    calls: dict[str, list] = {"upserts": [], "batches": [], "registered": [], "events": []}
     monkeypatch.setattr(ingest, "get_conn", lambda url: FakeConn())
     monkeypatch.setattr(ingest, "setup_db", lambda conn, tables: None)
     monkeypatch.setattr(ingest, "setup_meta_table", lambda conn: None)
@@ -33,7 +33,16 @@ def db(monkeypatch):
     monkeypatch.setattr(ingest, "get_embeddings_by_hash", lambda conn, table, hashes: {})
     monkeypatch.setattr(ingest, "get_cached_embeddings", lambda conn, hashes: {})
     monkeypatch.setattr(ingest, "embed_batch", lambda texts, input_type: [[0.0]] * len(texts))
-    monkeypatch.setattr(ingest, "upsert_chunks", lambda conn, table, chunks, embs: calls["upserts"].append(table))
+    def upsert(conn, table, chunks, embs):
+        calls["upserts"].append(table)
+        calls["events"].append(f"upsert:{table}")
+
+    def delete_except(conn, table, keep_ids):
+        calls["events"].append(f"prune:{table}:{len(keep_ids)}")
+        return 0
+
+    monkeypatch.setattr(ingest, "upsert_chunks", upsert)
+    monkeypatch.setattr(ingest, "delete_chunks_except", delete_except)
     monkeypatch.setattr(ingest, "add_pending_batch", lambda conn, b, ns: calls["batches"].append((b, ns)))
     monkeypatch.setattr(ingest, "register_namespace", lambda conn, ns, url, sha: calls["registered"].append(sha))
     monkeypatch.setattr(voyage_batch, "upload_file", lambda content, name: "file-1")
@@ -61,6 +70,24 @@ def test_ac_002_batching_off_by_default(monkeypatch, repo, db):
     monkeypatch.setenv("VOYAGE_BATCH_THRESHOLD", "0")
     assert ingest.ingest(str(repo), "ns") is True
     assert db["batches"] == []
+
+
+def test_full_reindex_prunes_stale_chunks_after_all_upserts(monkeypatch, repo, db):
+    (repo / "README.md").write_text("# Docs\n", encoding="utf-8")
+    assert ingest.ingest(str(repo), "ns") is True
+    assert db["events"] == ["upsert:ns_code", "upsert:ns_docs", "prune:ns_code:5", "prune:ns_docs:1"]
+
+
+def test_submitted_batch_prunes_nothing(monkeypatch, repo, db):
+    monkeypatch.setenv("VOYAGE_BATCH_THRESHOLD", "1")
+    assert ingest.ingest(str(repo), "ns", repo_url="https://github.com/o/r", use_batch=True) is False
+    assert db["events"] == []
+
+
+def test_empty_checkout_refuses_to_reindex(tmp_path, db):
+    with pytest.raises(RuntimeError, match="No indexable files"):
+        ingest.ingest(str(tmp_path), "ns")
+    assert db["events"] == []
 
 
 def test_invalid_threshold_fails_loudly(monkeypatch):

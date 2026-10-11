@@ -156,6 +156,17 @@ def delete_file_chunks(conn, tables: list[str], file_path: str, commit: bool = T
     return total
 
 
+
+def delete_chunks_except(conn, table: str, keep_ids: list[str]) -> int:
+    """Delete every chunk in the table whose id is not in keep_ids. Returns count deleted."""
+    with conn.cursor() as cur:
+        cur.execute("CREATE TEMP TABLE keep_ids (id TEXT PRIMARY KEY) ON COMMIT DROP")
+        execute_values(cur, "INSERT INTO keep_ids (id) VALUES %s ON CONFLICT DO NOTHING", [(i,) for i in keep_ids])
+        cur.execute(f"DELETE FROM {table} t WHERE NOT EXISTS (SELECT 1 FROM keep_ids k WHERE k.id = t.id)")
+        n = cur.rowcount
+    conn.commit()
+    return n
+
 # ── Namespace registry ────────────────────────────────────────────────────────
 
 def setup_meta_table(conn) -> None:

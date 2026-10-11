@@ -40,6 +40,7 @@ from rag import voyage_batch
 from rag.db import (
     add_pending_batch,
     content_hash,
+    delete_chunks_except,
     delete_file_chunks,
     get_cached_embeddings,
     get_conn,
@@ -312,6 +313,10 @@ def ingest(repo_path: str, namespace: str, repo_url: str | None = None, use_batc
     code_chunks = [c for c in all_chunks if c["table"] == code_table]
     doc_chunks = [c for c in all_chunks if c["table"] == docs_table]
     print(f"Total: {len(all_chunks)} chunks ({len(code_chunks)} code, {len(doc_chunks)} docs)")
+    if not all_chunks:
+        # Guards the stale-chunk delete below from wiping the index after a bad checkout
+        conn.close()
+        raise RuntimeError(f"No indexable files found in {repo_root} — refusing to reindex '{namespace}'")
 
     # BL-001 / BL-002: large full reindexes go via the Batch API
     if use_batch:
@@ -332,6 +337,13 @@ def ingest(repo_path: str, namespace: str, repo_url: str | None = None, use_batc
             continue
         print(f"\nUpserting {len(chunks)} chunks to {table}...")
         index_chunks(conn, table, chunks)
+
+    # Only after every upsert succeeded: drop chunks for removed or newly skipped files
+    # and chunk indexes past a file's new chunk count
+    for table, chunks in [(code_table, code_chunks), (docs_table, doc_chunks)]:
+        n = delete_chunks_except(conn, table, [c["id"] for c in chunks])
+        if n:
+            print(f"Removed {n} stale chunks from {table}")
 
     if repo_url:
         try:

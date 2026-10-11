@@ -11,7 +11,7 @@
 | **Linear issue** | N/A |
 | **Repo** | `github-repo-rag` |
 | **Trigger** | Railway cron (sync) / manual (ingest) |
-| **Schedule** | Railway cron service schedule |
+| **Schedule** | `0 * * * *` (hourly, Railway cron service) |
 | **Created** | 2026-10-11 |
 | **Last updated** | 2026-10-11 |
 
@@ -46,8 +46,8 @@ Cut Voyage spend on large embedding runs by sending them through the Voyage Batc
 
 | SLA | Target |
 |---|---|
-| Freshness (incremental) | Unchanged — one cron interval |
-| Freshness (full reindex via batch) | Up to one cron interval after the batch completes (≤ 12 h + interval) |
+| Freshness (incremental) | Within one hour |
+| Freshness (full reindex via batch) | Within one hour of the batch completing (≤ 13 h after submission) |
 
 ## Error handling
 
@@ -73,7 +73,6 @@ Cut Voyage spend on large embedding runs by sending them through the Voyage Batc
 | ID | Question | Owner | Due |
 |---|---|---|---|
 | OQ-001 | Voyage does not document a max upload file size; 100 MB per batch is a conservative assumption | @julianam-w | before merge |
-| OQ-002 | Should the Railway cron run more often than daily so completed batches are collected sooner? Up-to-date namespaces cost one GitHub API call each | @julianam-w | before merge |
 
 ## Change log
 

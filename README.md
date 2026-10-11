@@ -238,7 +238,7 @@ uv run python scripts/ask.py --namespace tamanu "How are encounters structured?"
 
 ## Incremental reindex
 
-`scripts/ingest.py --repo` registers its namespace automatically, so anything indexed via [Indexing a repository](#indexing-a-repository) is already eligible for sync. `scripts/sync.py` then keeps every registered namespace up to date: for each one it compares the last-indexed commit SHA against the latest on the default branch, re-embeds only the changed files, and deletes chunks for removed files. It falls back to a full reindex when the diff is too large for GitHub's compare API (> 250 commits or ≥ 300 files changed).
+`scripts/ingest.py --repo` registers its namespace automatically, so anything indexed via [Indexing a repository](#indexing-a-repository) is already eligible for sync. `scripts/sync.py` then keeps every registered namespace up to date: for each one it compares the last-indexed commit SHA against the latest on the default branch, re-embeds only the changed files, and deletes chunks for removed files. It falls back to a full reindex when the diff is too large for GitHub's compare API (> 250 commits or ≥ 300 files changed). A full reindex (here or via `ingest.py`) removes chunks the checkout no longer produces — deleted or newly skipped files, and chunks past a file's new length — after every upsert succeeds, and refuses to run if the checkout yields no indexable files.
 
 ```bash
 uv run python scripts/sync.py                     # sync all registered namespaces
@@ -269,7 +269,7 @@ Deploys from [`railway.toml`](railway.toml) (Dockerfile build). Needs the base `
 
 ### Scheduled sync (cron service)
 
-The daily incremental sync runs as a separate Railway service (not defined in a repo file — configured directly in the Railway dashboard):
+The hourly incremental sync runs as a separate Railway service (not defined in a repo file — configured directly in the Railway dashboard):
 
 1. In the same Railway project, **+ New → Empty Service**, connected to this repo so it builds from the same `Dockerfile` (which copies `scripts/` into the image).
 2. **Settings → Deploy → Custom Start Command:**
@@ -278,9 +278,9 @@ The daily incremental sync runs as a separate Railway service (not defined in a 
    ```
 3. **Settings → Deploy → Cron Schedule:**
    ```
-   0 15 * * *
+   0 * * * *
    ```
-   Setting a cron schedule makes Railway run the container to completion on that schedule instead of keeping it up as a long-lived service.
+   Setting a cron schedule makes Railway run the container to completion on that schedule instead of keeping it up as a long-lived service. Hourly costs little: a namespace with no new commits is one GitHub API call, and only changed text is embedded. Railway skips a run while the previous one is still going, so a long full reindex never overlaps the next run.
 4. **Variables:**
    - `DATABASE_URL` — reference the **internal** URL from the Postgres service (e.g. `${{Postgres.DATABASE_URL}}`), not `DATABASE_PUBLIC_URL`. This is why the cron service lives inside the Railway project: the sync job runs over the private network, so Postgres never needs a public port.
    - `VOYAGE_API_KEY` — Voyage AI key.
