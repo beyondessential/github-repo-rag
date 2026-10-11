@@ -36,7 +36,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from rag.db import get_conn, register_namespace, sanitise_namespace, setup_db, setup_meta_table, upsert_chunks
+from rag.db import (
+    content_hash,
+    delete_file_chunks,
+    get_conn,
+    get_embeddings_by_hash,
+    register_namespace,
+    sanitise_namespace,
+    setup_db,
+    setup_meta_table,
+    upsert_chunks,
+)
 from rag.github import shallow_clone
 from rag.query import embed_batch
 
@@ -65,6 +75,7 @@ DOC_CHUNK_SIZE = 4000     # chars (~1024 tokens)
 DOC_CHUNK_OVERLAP = 400
 
 EMBED_BATCH = 64  # texts per voyage API call
+INDEX_GROUP = 1000  # chunks per hash lookup + upsert during a full ingest
 
 _LANG_MAP = {
     ".ts": Language.TS, ".tsx": Language.TS,
@@ -157,6 +168,77 @@ def chunk_file(file_path: Path, repo_root: Path, namespace: str) -> list[dict]:
     ]
 
 
+# ── Embedding with reuse ──────────────────────────────────────────────────────
+
+def embed_chunks(conn, table: str, chunks: list[dict]) -> list[list[float]]:
+    """Return an embedding per chunk, calling Voyage only for text not already in the table.
+
+    Identical texts within `chunks` are embedded once.
+    """
+    hashes = [content_hash(c["text"]) for c in chunks]
+    known = get_embeddings_by_hash(conn, table, sorted(set(hashes)))
+
+    pending: dict[str, str] = {}
+    for h, c in zip(hashes, chunks, strict=True):
+        if h not in known:
+            pending.setdefault(h, c["text"])
+
+    items = list(pending.items())
+    for i in range(0, len(items), EMBED_BATCH):
+        batch = items[i:i + EMBED_BATCH]
+        embeddings = embed_batch([text for _, text in batch], input_type="document")
+        known.update({h: emb for (h, _), emb in zip(batch, embeddings, strict=True)})
+
+    print(f"    {len(chunks)} chunks: {len(chunks) - len(pending)} reused, {len(pending)} embedded")
+    return [known[h] for h in hashes]
+
+
+def index_chunks(conn, table: str, chunks: list[dict]) -> None:
+    """Embed (with reuse) and upsert chunks in groups, committing per group."""
+    total_groups = (len(chunks) + INDEX_GROUP - 1) // INDEX_GROUP
+    for i in range(0, len(chunks), INDEX_GROUP):
+        group = chunks[i:i + INDEX_GROUP]
+        print(f"  Group {i // INDEX_GROUP + 1}/{total_groups}")
+        upsert_chunks(conn, table, group, embed_chunks(conn, table, group))
+
+
+def replace_file_chunks(
+    conn, namespace: str, repo_root: Path, changed: list[str], deleted: list[str]
+) -> None:
+    """Re-index changed files and drop deleted ones in a single transaction.
+
+    Embeddings are fetched before anything is deleted, so stored embeddings for
+    unchanged text can be reused and the index never has a gap if embedding fails.
+    """
+    code_table = f"{namespace}_code"
+    docs_table = f"{namespace}_docs"
+    tables = [code_table, docs_table]
+
+    all_chunks: list[dict] = []
+    for rel_path in changed:
+        file_path = repo_root / rel_path
+        if not file_path.exists() or should_skip(Path(rel_path)):
+            continue
+        all_chunks.extend(chunk_file(file_path, repo_root, namespace))
+
+    by_table = {t: [c for c in all_chunks if c["table"] == t] for t in tables}
+    print(f"  New chunks: {len(all_chunks)} ({len(by_table[code_table])} code, {len(by_table[docs_table])} docs)")
+    embeddings = {t: embed_chunks(conn, t, chunks) for t, chunks in by_table.items() if chunks}
+
+    try:
+        total_deleted = sum(
+            delete_file_chunks(conn, tables, rel_path, commit=False) for rel_path in changed + deleted
+        )
+        for table, chunks in by_table.items():
+            if chunks:
+                upsert_chunks(conn, table, chunks, embeddings[table], commit=False)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    print(f"  Removed {total_deleted} stale chunks, upserted {len(all_chunks)}")
+
+
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 def ingest(repo_path: str, namespace: str, repo_url: str | None = None) -> None:
@@ -190,17 +272,8 @@ def ingest(repo_path: str, namespace: str, repo_url: str | None = None) -> None:
     for table, chunks in [(code_table, code_chunks), (docs_table, doc_chunks)]:
         if not chunks:
             continue
-        total_batches = (len(chunks) + EMBED_BATCH - 1) // EMBED_BATCH
-        print(f"\nUpserting {len(chunks)} chunks to {table} ({total_batches} batches)...")
-
-        for i in range(0, len(chunks), EMBED_BATCH):
-            batch = chunks[i:i + EMBED_BATCH]
-            batch_num = i // EMBED_BATCH + 1
-            print(f"  Batch {batch_num}/{total_batches} — embedding {len(batch)} chunks...", end=" ", flush=True)
-            embeddings = embed_batch([c["text"] for c in batch], input_type="document")
-            print("upserting...", end=" ", flush=True)
-            upsert_chunks(conn, table, batch, embeddings)
-            print("done")
+        print(f"\nUpserting {len(chunks)} chunks to {table}...")
+        index_chunks(conn, table, chunks)
 
     if repo_url:
         try:

@@ -27,17 +27,15 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 from rag.db import (
-    delete_file_chunks,
     get_conn,
     get_namespaces,
     register_namespace,
+    setup_db,
     setup_meta_table,
     update_namespace_sha,
-    upsert_chunks,
 )
 from rag.github import get_changed_files, get_latest_sha, parse_repo_url, shallow_clone
-from rag.query import embed_batch
-from scripts.ingest import EMBED_BATCH, chunk_file, ingest, should_skip
+from scripts.ingest import ingest, replace_file_chunks
 
 
 def _full_reindex(repo_url: str, namespace: str, token: str | None) -> None:
@@ -84,47 +82,15 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
         print(f"[{namespace}] Up to date (no indexed files changed)")
         return
 
-    code_table = f"{namespace}_code"
-    docs_table = f"{namespace}_docs"
-    tables = [code_table, docs_table]
-
-    # Remove stale chunks for every changed or deleted file
-    total_deleted = 0
-    for rel_path in changed + deleted:
-        n = delete_file_chunks(conn, tables, rel_path)
-        if n:
-            print(f"  Deleted {n} stale chunks: {rel_path}")
-        total_deleted += n
-    print(f"  {total_deleted} stale chunks removed")
+    # Adds content_hash to tables created before embedding reuse existed
+    setup_db(conn, [f"{namespace}_code", f"{namespace}_docs"])
 
     # Re-embed changed files — requires a checkout for file content
-    all_chunks: list[dict] = []
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = os.path.join(tmpdir, "repo")
         print(f"  Cloning {repo_url} (shallow)...")
         shallow_clone(repo_url, repo_path, token)
-        repo_root = Path(repo_path)
-
-        for rel_path in changed:
-            file_path = repo_root / rel_path
-            if not file_path.exists() or should_skip(Path(rel_path)):
-                continue
-            chunks = chunk_file(file_path, repo_root, namespace)
-            all_chunks.extend(chunks)
-
-    if all_chunks:
-        code_chunks = [c for c in all_chunks if c["table"] == code_table]
-        doc_chunks = [c for c in all_chunks if c["table"] == docs_table]
-        print(f"  New chunks: {len(all_chunks)} ({len(code_chunks)} code, {len(doc_chunks)} docs)")
-
-        for table, chunks in [(code_table, code_chunks), (docs_table, doc_chunks)]:
-            if not chunks:
-                continue
-            print(f"  Upserting {len(chunks)} chunks to {table}...")
-            for i in range(0, len(chunks), EMBED_BATCH):
-                batch = chunks[i:i + EMBED_BATCH]
-                embeddings = embed_batch([c["text"] for c in batch], input_type="document")
-                upsert_chunks(conn, table, batch, embeddings)
+        replace_file_chunks(conn, namespace, Path(repo_path), changed, deleted)
 
     update_namespace_sha(conn, namespace, latest_sha)
     print(f"[{namespace}] Sync complete → {latest_sha[:8]}")

@@ -247,6 +247,8 @@ uv run python scripts/sync.py --namespace tupaia   # sync one namespace
 
 In production this runs on a schedule via a Railway cron service — see [Deployment](#deployment).
 
+Each chunk stores a SHA-256 `content_hash` of its text. Before calling Voyage, every ingest, sync and reindex looks up existing embeddings by hash and only embeds text the namespace hasn't seen; identical chunks within a run are embedded once. An incremental sync embeds everything first, then swaps the old chunks for the new in a single transaction, so a Voyage failure leaves the index as it was. Tables created before this column existed are backfilled the first time they are set up again.
+
 Two lower-level scripts back this:
 - `scripts/register.py` — register (or re-register) a namespace's baseline commit SHA without re-ingesting. Useful after a manual `ingest.py` run, or to clear the SHA and force a full reindex on the next sync.
 - `scripts/reindex.py` — re-embed an explicit set of changed/deleted files, given as `CHANGED_FILES` / `DELETED_FILES` (space-separated repo-relative paths). This is the primitive `sync.py` builds on; call it directly only if you already know exactly which files changed.

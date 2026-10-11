@@ -17,6 +17,9 @@ dependencies = [
 [project.optional-dependencies]
 ask = ["anthropic>=0.40.0"]
 
+[dependency-groups]
+dev = ["pytest>=8.0.0"]
+
 [project.scripts]
 github-repo-rag-mcp = "mcp_server:main"
 

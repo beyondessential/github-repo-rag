@@ -1,6 +1,8 @@
 """Database helpers: setup, upsert."""
 
+import hashlib
 import re
+
 import psycopg2
 from pgvector.psycopg2 import register_vector
 from psycopg2.extras import execute_values
@@ -40,6 +42,17 @@ def setup_table(conn, table: str) -> None:
             ALTER TABLE {table}
             ADD COLUMN IF NOT EXISTS chunk_index INT NOT NULL DEFAULT 0
         """)
+        # content_hash lets re-indexing reuse an existing embedding for unchanged text.
+        # Backfilled in SQL; must match content_hash() below.
+        cur.execute(f"""
+            ALTER TABLE {table}
+            ADD COLUMN IF NOT EXISTS content_hash TEXT
+        """)
+        cur.execute(f"""
+            UPDATE {table}
+            SET content_hash = encode(sha256(convert_to(text, 'UTF8')), 'hex')
+            WHERE content_hash IS NULL
+        """)
         cur.execute(f"""
             CREATE INDEX IF NOT EXISTS {table}_embedding_idx
             ON {table} USING hnsw (embedding vector_cosine_ops)
@@ -52,6 +65,10 @@ def setup_table(conn, table: str) -> None:
             CREATE INDEX IF NOT EXISTS {table}_file_path_idx
             ON {table} (file_path)
         """)
+        cur.execute(f"""
+            CREATE INDEX IF NOT EXISTS {table}_content_hash_idx
+            ON {table} (content_hash)
+        """)
     conn.commit()
 
 
@@ -61,39 +78,68 @@ def setup_db(conn, tables: list[str]) -> None:
         setup_table(conn, table)
 
 
-def upsert_chunks(conn, table: str, chunks: list[dict], embeddings: list[list[float]]) -> None:
+def content_hash(text: str) -> str:
+    """SHA-256 hex digest of a chunk's text, matching the SQL backfill in setup_table()."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def get_embeddings_by_hash(conn, table: str, hashes: list[str]) -> dict[str, list[float]]:
+    """Return {content_hash: embedding} for any hashes already stored in the table."""
+    if not hashes:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT DISTINCT ON (content_hash) content_hash, embedding
+            FROM {table}
+            WHERE content_hash = ANY(%s)
+            """,
+            (list(hashes),),
+        )
+        return {h: emb for h, emb in cur.fetchall()}
+
+
+def upsert_chunks(
+    conn, table: str, chunks: list[dict], embeddings: list[list[float]], commit: bool = True
+) -> None:
     """Upsert a batch of chunks into a RAG table."""
     rows = [
-        (chunk["id"], emb, chunk["text"], chunk["file_path"], chunk["package"], chunk.get("chunk_index", 0))
-        for chunk, emb in zip(chunks, embeddings)
+        (
+            chunk["id"], emb, chunk["text"], chunk["file_path"], chunk["package"],
+            chunk.get("chunk_index", 0), content_hash(chunk["text"]),
+        )
+        for chunk, emb in zip(chunks, embeddings, strict=True)
     ]
     with conn.cursor() as cur:
         execute_values(
             cur,
             f"""
-            INSERT INTO {table} (id, embedding, text, file_path, package, chunk_index)
+            INSERT INTO {table} (id, embedding, text, file_path, package, chunk_index, content_hash)
             VALUES %s
             ON CONFLICT (id) DO UPDATE SET
                 embedding = EXCLUDED.embedding,
                 text = EXCLUDED.text,
                 file_path = EXCLUDED.file_path,
                 package = EXCLUDED.package,
-                chunk_index = EXCLUDED.chunk_index
+                chunk_index = EXCLUDED.chunk_index,
+                content_hash = EXCLUDED.content_hash
             """,
             rows,
-            template="(%s, %s::vector, %s, %s, %s, %s)",
+            template="(%s, %s::vector, %s, %s, %s, %s, %s)",
         )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
-def delete_file_chunks(conn, tables: list[str], file_path: str) -> int:
+def delete_file_chunks(conn, tables: list[str], file_path: str, commit: bool = True) -> int:
     """Delete all chunks for a file across the given tables. Returns count deleted."""
     total = 0
     for table in tables:
         with conn.cursor() as cur:
             cur.execute(f"DELETE FROM {table} WHERE file_path = %s", (file_path,))
             total += cur.rowcount
-    conn.commit()
+    if commit:
+        conn.commit()
     return total
 
 
