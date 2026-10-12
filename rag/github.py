@@ -1,6 +1,9 @@
-"""GitHub API helpers used by scripts/sync.py."""
+"""GitHub API and clone helpers used by scripts/ingest.py and scripts/sync.py."""
 
+import base64
 import json
+import os
+import subprocess
 import urllib.error
 import urllib.request
 
@@ -33,16 +36,29 @@ def parse_repo_url(repo_url: str) -> tuple[str, str]:
     return parts[-2], parts[-1].removesuffix(".git")
 
 
-def authed_clone_url(repo_url: str, token: str | None) -> str:
-    """Embed a token into an https GitHub URL so private repos clone non-interactively.
+def clone_env(repo_url: str, token: str | None) -> dict[str, str]:
+    """Environment for `git clone` that authenticates to github.com with the token.
 
-    Returns the URL unchanged when no token is set or it isn't an https github.com
-    URL. Keep the original (token-free) URL for any logging — never print the result.
+    The token travels as an HTTP header set through GIT_CONFIG_* variables, so it never
+    appears in the command line, git's own output, or a CalledProcessError message.
     """
-    prefix = "https://github.com/"
-    if token and repo_url.startswith(prefix):
-        return f"https://x-access-token:{token}@github.com/{repo_url[len(prefix):]}"
-    return repo_url
+    env = os.environ.copy()
+    if not token or not repo_url.startswith("https://github.com/"):
+        return env
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    n = int(env.get("GIT_CONFIG_COUNT", "0"))
+    env["GIT_CONFIG_COUNT"] = str(n + 1)
+    env[f"GIT_CONFIG_KEY_{n}"] = "http.https://github.com/.extraheader"
+    env[f"GIT_CONFIG_VALUE_{n}"] = f"AUTHORIZATION: basic {basic}"
+    return env
+
+
+def shallow_clone(repo_url: str, dest: str, token: str | None, ref: str | None = None) -> None:
+    """Shallow-clone a repo (optionally at a branch or tag), authenticating private repos."""
+    cmd = ["git", "clone", "--depth=1"]
+    if ref:
+        cmd += ["--branch", ref]
+    subprocess.run([*cmd, repo_url, dest], check=True, env=clone_env(repo_url, token))
 
 
 def get_latest_sha(owner: str, repo: str, token: str | None) -> str:
