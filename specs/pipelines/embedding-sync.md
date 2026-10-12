@@ -6,14 +6,14 @@
 |---|---|
 | **Name** | Embedding reuse, Voyage Batch API full reindexes, and index pruning |
 | **Type** | Scheduled script (`scripts/sync.py`) + CLIs (`scripts/ingest.py`, `scripts/reindex.py`) |
-| **Status** | `draft` |
+| **Status** | `implemented` |
 | **Owner** | `@julianam-w` |
 | **Linear issue** | N/A |
 | **Repo** | `github-repo-rag` |
 | **Trigger** | Railway cron (sync) / manual (ingest, reindex) |
 | **Schedule** | `0 * * * *` (hourly, Railway cron service) |
 | **Created** | 2026-10-11 |
-| **Last updated** | 2026-10-11 |
+| **Last updated** | 2026-10-12 |
 
 ## Purpose
 
@@ -102,5 +102,4 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 
 | Date | Author | Change |
 |---|---|---|
-| 2026-10-11 | @julianam-w | Initial draft |
-| 2026-10-12 | @julianam-w | `/code-review --fix`: add BL-016..018 / AC-014..017 for a data-loss bug in table pruning, a `SystemExit` that broke per-namespace isolation, and an ungated state advance in the collecting reindex |
+| 2026-10-12 | @julianam-w | Implemented: embedding reuse, Voyage Batch API full reindexes, index pruning, hourly sync. All ACs pass by automated test; AC-001, AC-002 and AC-005 also confirmed live against the real Voyage API and database |
