@@ -12,7 +12,8 @@ Usage:
     # Register at a specific commit SHA (e.g. the one you actually indexed):
     python scripts/register.py --repo https://github.com/beyondessential/tupaia --namespace tupaia --sha abc1234
 
-    # Clear the SHA so the next sync.py run triggers a full reindex:
+    # Clear the SHA so the next sync.py run triggers a full reindex
+    # (also clears any pending Voyage batch recorded for this namespace):
     python scripts/register.py --repo https://github.com/beyondessential/tupaia --namespace tupaia --sha ""
 
 Environment variables:
@@ -29,7 +30,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from rag.db import get_conn, register_namespace, setup_meta_table
+from rag.db import (
+    delete_cached_embeddings,
+    delete_pending_batches,
+    get_conn,
+    get_pending_batches,
+    register_namespace,
+    setup_meta_table,
+)
 from rag.github import get_latest_sha, parse_repo_url
 
 
@@ -64,6 +72,17 @@ def main() -> None:
     conn = get_conn(os.environ["DATABASE_URL"])
     setup_meta_table(conn)
     register_namespace(conn, args.namespace, args.repo, sha)
+
+    if args.sha == "":
+        # BL-021: clearing the SHA is meant to force a full reindex. sync.py checks
+        # for a pending batch before it ever looks at last_commit_sha, so a stuck or
+        # in-flight batch would otherwise silently override this — clear it too.
+        batch_ids = get_pending_batches(conn, args.namespace)
+        if batch_ids:
+            delete_pending_batches(conn, batch_ids)
+            delete_cached_embeddings(conn, batch_ids)
+            print(f"  Cleared {len(batch_ids)} pending batch(es) for '{args.namespace}'")
+
     conn.close()
 
     status = sha[:8] if sha else "None (will full-reindex on next sync)"

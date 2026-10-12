@@ -4,7 +4,9 @@ Incremental sync: for each registered namespace, check whether new commits have
 landed since the last index and re-embed only the changed files.
 
 Falls back to a full reindex when the diff exceeds GitHub's compare API limits
-(> 250 commits or >= 300 files changed).
+(> 250 commits or >= 300 files changed). A large full reindex is submitted to the
+Voyage Batch API and finished by a later run once the batch completes
+(specs/pipelines/embedding-sync.md).
 
 Usage:
     python scripts/sync.py                     # sync all registered namespaces
@@ -13,6 +15,7 @@ Usage:
 Environment variables:
     DATABASE_URL   — PostgreSQL connection string
     VOYAGE_API_KEY — Voyage AI API key
+    VOYAGE_BATCH_THRESHOLD — new texts before a full reindex uses the Voyage Batch API (default 2000)
     GITHUB_TOKEN   — GitHub API token (optional; raises rate limit from 60 to 5000 req/hr)
 """
 
@@ -26,27 +29,78 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+from rag import voyage_batch
 from rag.db import (
-    delete_file_chunks,
+    cache_embeddings,
+    delete_cached_embeddings,
+    delete_pending_batches,
     get_conn,
     get_namespaces,
+    get_pending_batches,
+    purge_stale_cache,
     register_namespace,
+    setup_db,
     setup_meta_table,
     update_namespace_sha,
-    upsert_chunks,
 )
 from rag.github import get_changed_files, get_latest_sha, parse_repo_url, shallow_clone
-from rag.query import embed_batch
-from scripts.ingest import EMBED_BATCH, chunk_file, ingest, should_skip
+from scripts.ingest import ingest, replace_file_chunks
+
+CACHE_PAGE = 1000  # batch output rows per cache insert
 
 
-def _full_reindex(repo_url: str, namespace: str, token: str | None) -> None:
-    """Clone and fully reindex. Caller updates the commit SHA afterwards."""
+def _full_reindex(repo_url: str, namespace: str, token: str | None, use_batch: bool = True) -> bool:
+    """Clone and fully reindex. Returns False if a Voyage batch was submitted instead.
+
+    Caller updates the commit SHA afterwards, only when this returns True.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = os.path.join(tmpdir, "repo")
         print(f"  Cloning {repo_url} (shallow)...")
         shallow_clone(repo_url, repo_path, token)
-        ingest(repo_path, namespace)  # repo_url omitted — caller handles SHA registration
+        # repo_url omitted — caller handles SHA registration
+        return ingest(repo_path, namespace, use_batch=use_batch)
+
+
+def _collect_batches(conn, namespace: str, batch_ids: list[str]) -> bool:
+    """Load finished batch output into the embedding cache. Returns False while any batch is in flight."""
+    batches = [voyage_batch.get_batch(b) for b in batch_ids]
+
+    # BL-006: wait for every batch in the namespace to finish
+    in_flight = [b for b in batches if b["status"] in voyage_batch.IN_FLIGHT]
+    if in_flight:
+        for b in in_flight:
+            counts = b.get("request_counts") or {}
+            progress = f"{counts.get('completed', 0)}/{counts.get('total', '?')}"
+            print(f"[{namespace}] Batch {b['id']} {b['status']} ({progress})")
+        return False
+
+    failed = []
+    for b in batches:
+        if b.get("output_file_id"):
+            # Cache in pages so a 100K-line output never sits in memory at once
+            cached = 0
+            page: list[tuple[str, list[float]]] = []
+            for row in voyage_batch.iter_output_embeddings(b["output_file_id"]):
+                page.append(row)
+                if len(page) >= CACHE_PAGE:
+                    cache_embeddings(conn, b["id"], page)
+                    cached += len(page)
+                    page = []
+            if page:
+                cache_embeddings(conn, b["id"], page)
+                cached += len(page)
+            print(f"[{namespace}] Batch {b['id']} {b['status']}: cached {cached} embeddings")
+        if b["status"] in voyage_batch.FAILED:
+            failed.append(b)
+
+    # BL-009: drop every pending row (completed output stays cached) so the next run's full
+    # reindex resubmits only the uncached texts instead of embedding them in real time
+    if failed:
+        delete_pending_batches(conn, batch_ids)
+        detail = ", ".join(f"{b['id']} ({b['status']}: {b.get('errors')})" for b in failed)
+        raise RuntimeError(f"Voyage batch failed: {detail}")
+    return True
 
 
 def sync_namespace(conn, ns: dict, token: str | None) -> None:
@@ -57,6 +111,27 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
     owner, repo = parse_repo_url(repo_url)
     latest_sha = get_latest_sha(owner, repo, token)
 
+    batch_ids = get_pending_batches(conn, namespace)
+    if batch_ids:
+        if not _collect_batches(conn, namespace, batch_ids):
+            return
+        # BL-007: real-time full reindex, reading batch results from the cache
+        print(f"[{namespace}] Batches complete — running full reindex from cache")
+        # BL-018: only advance state if the reindex actually completed. ingest(use_batch=False)
+        # can only return True or raise — it never returns False — so this mirrors the gating
+        # at the other two full-reindex call sites rather than guarding a reachable path; a
+        # genuine failure here raises and is caught by main()'s per-namespace handler instead,
+        # leaving batch state untouched the same way.
+        if not _full_reindex(repo_url, namespace, token, use_batch=False):
+            print(f"[{namespace}] Full reindex from cache did not complete — retrying next run")
+            return
+        # BL-008: advance the SHA, then clear batch state
+        register_namespace(conn, namespace, repo_url, latest_sha)
+        delete_pending_batches(conn, batch_ids)
+        delete_cached_embeddings(conn, batch_ids)
+        print(f"[{namespace}] Sync complete → {latest_sha[:8]}")
+        return
+
     if latest_sha == last_sha:
         print(f"[{namespace}] Up to date ({latest_sha[:8]})")
         return
@@ -64,8 +139,8 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
     # No previous SHA recorded — do a full reindex to establish a baseline
     if last_sha is None:
         print(f"[{namespace}] No baseline commit — running full reindex")
-        _full_reindex(repo_url, namespace, token)
-        register_namespace(conn, namespace, repo_url, latest_sha)
+        if _full_reindex(repo_url, namespace, token):
+            register_namespace(conn, namespace, repo_url, latest_sha)
         return
 
     print(f"[{namespace}] New commits {last_sha[:8]}...{latest_sha[:8]}, checking diff...")
@@ -73,8 +148,8 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
 
     if too_large:
         print(f"[{namespace}] Diff too large — falling back to full reindex")
-        _full_reindex(repo_url, namespace, token)
-        update_namespace_sha(conn, namespace, latest_sha)
+        if _full_reindex(repo_url, namespace, token):
+            update_namespace_sha(conn, namespace, latest_sha)
         return
 
     print(f"[{namespace}] {len(changed)} changed, {len(deleted)} deleted files")
@@ -84,47 +159,15 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
         print(f"[{namespace}] Up to date (no indexed files changed)")
         return
 
-    code_table = f"{namespace}_code"
-    docs_table = f"{namespace}_docs"
-    tables = [code_table, docs_table]
-
-    # Remove stale chunks for every changed or deleted file
-    total_deleted = 0
-    for rel_path in changed + deleted:
-        n = delete_file_chunks(conn, tables, rel_path)
-        if n:
-            print(f"  Deleted {n} stale chunks: {rel_path}")
-        total_deleted += n
-    print(f"  {total_deleted} stale chunks removed")
+    # Adds content_hash to tables created before embedding reuse existed
+    setup_db(conn, [f"{namespace}_code", f"{namespace}_docs"])
 
     # Re-embed changed files — requires a checkout for file content
-    all_chunks: list[dict] = []
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = os.path.join(tmpdir, "repo")
         print(f"  Cloning {repo_url} (shallow)...")
         shallow_clone(repo_url, repo_path, token)
-        repo_root = Path(repo_path)
-
-        for rel_path in changed:
-            file_path = repo_root / rel_path
-            if not file_path.exists() or should_skip(Path(rel_path)):
-                continue
-            chunks = chunk_file(file_path, repo_root, namespace)
-            all_chunks.extend(chunks)
-
-    if all_chunks:
-        code_chunks = [c for c in all_chunks if c["table"] == code_table]
-        doc_chunks = [c for c in all_chunks if c["table"] == docs_table]
-        print(f"  New chunks: {len(all_chunks)} ({len(code_chunks)} code, {len(doc_chunks)} docs)")
-
-        for table, chunks in [(code_table, code_chunks), (docs_table, doc_chunks)]:
-            if not chunks:
-                continue
-            print(f"  Upserting {len(chunks)} chunks to {table}...")
-            for i in range(0, len(chunks), EMBED_BATCH):
-                batch = chunks[i:i + EMBED_BATCH]
-                embeddings = embed_batch([c["text"] for c in batch], input_type="document")
-                upsert_chunks(conn, table, batch, embeddings)
+        replace_file_chunks(conn, namespace, Path(repo_path), changed, deleted)
 
     update_namespace_sha(conn, namespace, latest_sha)
     print(f"[{namespace}] Sync complete → {latest_sha[:8]}")
@@ -141,6 +184,10 @@ def main() -> None:
     token = os.environ.get("GITHUB_TOKEN")
     conn = get_conn(os.environ["DATABASE_URL"])
     setup_meta_table(conn)
+    # BL-010: drop week-old batch results
+    purged = purge_stale_cache(conn)
+    if purged:
+        print(f"Purged {purged} stale batch embeddings")
 
     namespaces = get_namespaces(conn)
 
@@ -160,6 +207,8 @@ def main() -> None:
         try:
             sync_namespace(conn, ns, token)
         except Exception as e:
+            # Clear any aborted transaction so later namespaces can still use the connection
+            conn.rollback()
             print(f"[{ns['namespace']}] ERROR: {e}")
             errors.append(ns["namespace"])
 

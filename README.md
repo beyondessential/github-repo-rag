@@ -238,7 +238,7 @@ uv run python scripts/ask.py --namespace tamanu "How are encounters structured?"
 
 ## Incremental reindex
 
-`scripts/ingest.py --repo` registers its namespace automatically, so anything indexed via [Indexing a repository](#indexing-a-repository) is already eligible for sync. `scripts/sync.py` then keeps every registered namespace up to date: for each one it compares the last-indexed commit SHA against the latest on the default branch, re-embeds only the changed files, and deletes chunks for removed files. It falls back to a full reindex when the diff is too large for GitHub's compare API (> 250 commits or ≥ 300 files changed).
+`scripts/ingest.py --repo` registers its namespace automatically, so anything indexed via [Indexing a repository](#indexing-a-repository) is already eligible for sync. `scripts/sync.py` then keeps every registered namespace up to date: for each one it compares the last-indexed commit SHA against the latest on the default branch, re-embeds only the changed files, and deletes chunks for removed files. It falls back to a full reindex when the diff is too large for GitHub's compare API (> 250 commits or ≥ 300 files changed). A full reindex (here or via `ingest.py`) removes chunks the checkout no longer produces — deleted or newly skipped files, and chunks past a file's new length — after every upsert succeeds, and refuses to run if the checkout yields no indexable files.
 
 ```bash
 uv run python scripts/sync.py                     # sync all registered namespaces
@@ -246,6 +246,14 @@ uv run python scripts/sync.py --namespace tupaia   # sync one namespace
 ```
 
 In production this runs on a schedule via a Railway cron service — see [Deployment](#deployment).
+
+Each chunk stores a SHA-256 `content_hash` of its text. Before calling Voyage, every ingest, sync and reindex looks up existing embeddings by hash and only embeds text the namespace hasn't seen; identical chunks within a run are embedded once. An incremental sync embeds everything first, then swaps the old chunks for the new in a single transaction, so a Voyage failure leaves the index as it was. Tables created before this column existed are backfilled the first time they are set up again.
+
+### Voyage Batch API for full reindexes
+
+A full reindex (no baseline SHA, or a diff too large for GitHub's compare API) with at least `VOYAGE_BATCH_THRESHOLD` (default 2000) new texts goes through the [Voyage Batch API](https://docs.voyageai.com/docs/batch-inference), which costs 33% less and finishes within 12 hours. That sync run submits the batch and leaves the namespace as it is. Later runs skip the namespace while the batch is in flight, then load the results into `rag_embedding_cache` and do the full reindex from the cache. Incremental syncs always embed in real time. Spec: [specs/pipelines/embedding-sync.md](specs/pipelines/embedding-sync.md).
+
+To index a new repo the same way, run `ingest.py --repo <url> --batch` (it can't be combined with `--ref`). The next scheduled sync after Voyage finishes completes the index. Set `VOYAGE_BATCH_THRESHOLD` to a very large number to turn batching off.
 
 Two lower-level scripts back this:
 - `scripts/register.py` — register (or re-register) a namespace's baseline commit SHA without re-ingesting. Useful after a manual `ingest.py` run, or to clear the SHA and force a full reindex on the next sync.
@@ -261,7 +269,7 @@ Deploys from [`railway.toml`](railway.toml) (Dockerfile build). Needs the base `
 
 ### Scheduled sync (cron service)
 
-The daily incremental sync runs as a separate Railway service (not defined in a repo file — configured directly in the Railway dashboard):
+The hourly incremental sync runs as a separate Railway service (not defined in a repo file — configured directly in the Railway dashboard):
 
 1. In the same Railway project, **+ New → Empty Service**, connected to this repo so it builds from the same `Dockerfile` (which copies `scripts/` into the image).
 2. **Settings → Deploy → Custom Start Command:**
@@ -270,9 +278,9 @@ The daily incremental sync runs as a separate Railway service (not defined in a 
    ```
 3. **Settings → Deploy → Cron Schedule:**
    ```
-   0 15 * * *
+   0 * * * *
    ```
-   Setting a cron schedule makes Railway run the container to completion on that schedule instead of keeping it up as a long-lived service.
+   Setting a cron schedule makes Railway run the container to completion on that schedule instead of keeping it up as a long-lived service. Hourly costs little: a namespace with no new commits is one GitHub API call, and only changed text is embedded. Railway skips a run while the previous one is still going, so a long full reindex never overlaps the next run.
 4. **Variables:**
    - `DATABASE_URL` — reference the **internal** URL from the Postgres service (e.g. `${{Postgres.DATABASE_URL}}`), not `DATABASE_PUBLIC_URL`. This is why the cron service lives inside the Railway project: the sync job runs over the private network, so Postgres never needs a public port.
    - `VOYAGE_API_KEY` — Voyage AI key.
