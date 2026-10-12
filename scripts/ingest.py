@@ -186,6 +186,7 @@ def embed_chunks(conn, table: str, chunks: list[dict]) -> list[list[float]]:
     known = get_embeddings_by_hash(conn, table, sorted(set(hashes)))
     # BL-007: results of a collected Voyage batch
     known.update(get_cached_embeddings(conn, sorted(set(hashes) - known.keys())))
+    reused = sum(1 for h in hashes if h in known)
 
     # BL-012: one Voyage input per distinct text
     pending: dict[str, str] = {}
@@ -199,7 +200,8 @@ def embed_chunks(conn, table: str, chunks: list[dict]) -> list[list[float]]:
         embeddings = embed_batch([text for _, text in batch], input_type="document")
         known.update({h: emb for (h, _), emb in zip(batch, embeddings, strict=True)})
 
-    print(f"    {len(chunks)} chunks: {len(chunks) - len(pending)} reused, {len(pending)} embedded")
+    deduped = len(hashes) - reused - len(pending)
+    print(f"    {len(chunks)} chunks: {reused} reused, {deduped} deduped, {len(pending)} embedded")
     return [known[h] for h in hashes]
 
 
@@ -253,13 +255,16 @@ def replace_file_chunks(
 # ── Voyage Batch API ──────────────────────────────────────────────────────────
 
 def batch_threshold() -> int:
+    """Read VOYAGE_BATCH_THRESHOLD, raising ValueError (not SystemExit) on a bad value."""
     raw = os.environ.get("VOYAGE_BATCH_THRESHOLD", "")
     if not raw:
         return DEFAULT_BATCH_THRESHOLD
     try:
         return int(raw)
     except ValueError:
-        raise SystemExit(f"VOYAGE_BATCH_THRESHOLD must be an integer, got {raw!r}") from None
+        # BL-017: a plain ValueError, not SystemExit (a BaseException), so sync.py's
+        # per-namespace handling catches it and fails only this namespace
+        raise ValueError(f"VOYAGE_BATCH_THRESHOLD must be an integer, got {raw!r}") from None
 
 
 def pending_texts(conn, tables: list[str], chunks: list[dict]) -> dict[str, str]:
@@ -344,7 +349,11 @@ def ingest(repo_path: str, namespace: str, repo_url: str | None = None, use_batc
 
     # BL-014: only after every upsert succeeded, drop chunks for removed or newly skipped files
     # and chunk indexes past a file's new chunk count
+    # BL-016: a table with zero chunks this run is left untouched, not wiped
     for table, chunks in [(code_table, code_chunks), (docs_table, doc_chunks)]:
+        if not chunks:
+            print(f"No chunks for {table} this run — leaving its existing chunks untouched")
+            continue
         n = delete_chunks_except(conn, table, [c["id"] for c in chunks])
         if n:
             print(f"Removed {n} stale chunks from {table}")

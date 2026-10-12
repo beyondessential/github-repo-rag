@@ -1,6 +1,7 @@
 """Voyage Batch API flow — specs/pipelines/embedding-sync.md. DB, Voyage and git are faked."""
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -90,10 +91,40 @@ def test_ac_013_empty_checkout_refuses_to_reindex(tmp_path, db):
     assert db["events"] == []
 
 
-def test_invalid_threshold_fails_loudly(monkeypatch):
+def test_ac_016_invalid_threshold_raises_value_error(monkeypatch):
     monkeypatch.setenv("VOYAGE_BATCH_THRESHOLD", "lots")
-    with pytest.raises(SystemExit):
+    with pytest.raises(ValueError, match="VOYAGE_BATCH_THRESHOLD"):
         ingest.batch_threshold()
+
+
+def test_ac_016_sync_main_isolates_a_namespace_that_raises_value_error(monkeypatch):
+    """A bad VOYAGE_BATCH_THRESHOLD must fail only the namespace that hits it, not the whole run."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fake")
+    monkeypatch.setenv("VOYAGE_BATCH_THRESHOLD", "lots")
+    monkeypatch.setattr(sync, "get_conn", lambda url: FakeConn())
+    monkeypatch.setattr(sync, "setup_meta_table", lambda conn: None)
+    monkeypatch.setattr(sync, "purge_stale_cache", lambda conn: 0)
+    namespaces = [
+        {"namespace": "bad", "repo_url": "https://github.com/o/bad", "last_commit_sha": None},
+        {"namespace": "good", "repo_url": "https://github.com/o/good", "last_commit_sha": "a" * 40},
+    ]
+    monkeypatch.setattr(sync, "get_namespaces", lambda conn: namespaces)
+    monkeypatch.setattr(sync, "get_latest_sha", lambda owner, repo, token: "a" * 40)
+    monkeypatch.setattr(sync, "get_pending_batches", lambda conn, ns: [])
+
+    def fake_full_reindex(url, ns, token, use_batch=True):
+        # Exercises the real batch_threshold() call for the "bad" namespace's full reindex
+        if ns == "bad":
+            ingest.batch_threshold()
+        return True
+
+    monkeypatch.setattr(sync, "_full_reindex", fake_full_reindex)
+    monkeypatch.setattr(sys, "argv", ["sync.py"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        sync.main()
+    # main() exits 1 (recorded error) rather than crashing with an uncaught ValueError
+    assert exc_info.value.code == 1
 
 
 def test_ac_003_input_lines_keyed_by_hash_and_split_at_caps(monkeypatch):
@@ -196,3 +227,19 @@ def test_ac_008_only_successful_output_lines_are_loaded(monkeypatch):
     output = "\n".join([line("ok"), line("bad-status", 400), line("errored", 200, {"message": "x"}), ""])
     monkeypatch.setattr(voyage_batch, "_stream_lines", lambda path: iter(output.encode().splitlines(keepends=True)))
     assert list(voyage_batch.iter_output_embeddings("out")) == [("ok", [0.5])]
+
+
+def test_ac_015_ingest_leaves_a_zero_chunk_table_untouched(monkeypatch, repo, db):
+    """repo fixture has only .py files, so ns_docs gets zero chunks this run — it must be
+    skipped (no delete_chunks_except call at all), not pruned with an empty keep list."""
+    assert ingest.ingest(str(repo), "ns") is True
+    assert db["events"] == ["upsert:ns_code", "prune:ns_code:5"]
+
+
+def test_ac_017_collecting_reindex_does_not_advance_state_when_reindex_fails(monkeypatch, sync_env):
+    monkeypatch.setattr(voyage_batch, "get_batch", lambda b: {"id": b, "status": "completed", "output_file_id": "out"})
+    monkeypatch.setattr(sync, "_full_reindex", lambda url, ns, token, use_batch=True:
+                        sync_env["reindex"].append(use_batch) or False)
+    sync.sync_namespace(FakeConn(), NS, None)
+    assert sync_env["reindex"] == [False]
+    assert sync_env["registered"] == [] and sync_env["deleted"] == [] and sync_env["cleared"] == []

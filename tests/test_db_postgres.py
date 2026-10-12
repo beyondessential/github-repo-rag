@@ -43,3 +43,13 @@ def test_delete_chunks_except_keeps_only_given_ids(conn):
     assert db.delete_chunks_except(conn, "t_prune", [f"id{i}" for i in range(1, 91)]) == 10
     # Second call in the same session: the keep_ids temp table was dropped on commit
     assert db.delete_chunks_except(conn, "t_prune", ["id1"]) == 89
+
+
+def test_ac_014_delete_chunks_except_is_a_noop_on_empty_keep_ids(conn):
+    with conn.cursor() as cur:
+        cur.execute("CREATE TEMP TABLE t_empty_keep (id TEXT PRIMARY KEY)")
+        cur.execute("INSERT INTO t_empty_keep SELECT 'id' || g FROM generate_series(1, 20) g")
+    assert db.delete_chunks_except(conn, "t_empty_keep", []) == 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM t_empty_keep")
+        assert cur.fetchone()[0] == 20

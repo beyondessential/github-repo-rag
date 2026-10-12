@@ -117,7 +117,10 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
             return
         # BL-007: real-time full reindex, reading batch results from the cache
         print(f"[{namespace}] Batches complete — running full reindex from cache")
-        _full_reindex(repo_url, namespace, token, use_batch=False)
+        # BL-018: only advance state if the reindex actually completed
+        if not _full_reindex(repo_url, namespace, token, use_batch=False):
+            print(f"[{namespace}] Full reindex from cache did not complete — retrying next run")
+            return
         # BL-008: advance the SHA, then clear batch state
         register_namespace(conn, namespace, repo_url, latest_sha)
         delete_pending_batches(conn, batch_ids)

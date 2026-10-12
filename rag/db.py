@@ -163,7 +163,14 @@ def delete_file_chunks(conn, tables: list[str], file_path: str, commit: bool = T
 
 
 def delete_chunks_except(conn, table: str, keep_ids: list[str]) -> int:
-    """Delete every chunk in the table whose id is not in keep_ids. Returns count deleted."""
+    """Delete every chunk in the table whose id is not in keep_ids. Returns count deleted.
+
+    BL-016: a no-op when keep_ids is empty. A run that found zero chunks for this
+    table (a genuinely empty repo subtree, or a partial/broken checkout) must never
+    be read as "keep nothing" — that would silently empty an already-indexed table.
+    """
+    if not keep_ids:
+        return 0
     with conn.cursor() as cur:
         cur.execute("CREATE TEMP TABLE keep_ids (id TEXT PRIMARY KEY) ON COMMIT DROP")
         execute_values(cur, "INSERT INTO keep_ids (id) VALUES %s ON CONFLICT DO NOTHING", [(i,) for i in keep_ids])

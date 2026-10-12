@@ -46,6 +46,9 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 - **BL-013:** An incremental sync or reindex embeds every changed chunk before deleting anything, then deletes stale chunks and upserts new ones in a single transaction.
 - **BL-014:** Once every upsert of a full reindex has succeeded, chunks whose ids the checkout no longer produces are deleted.
 - **BL-015:** A full reindex of a checkout with no indexable files fails without changing the index.
+- **BL-016:** A table that produces zero chunks in a run is left untouched rather than pruned; an empty keep set is never read as "keep nothing".
+- **BL-017:** A malformed `VOYAGE_BATCH_THRESHOLD` fails only the namespace attempting a full reindex, not the whole sync run.
+- **BL-018:** The full reindex that collects a completed batch advances `last_commit_sha` and clears batch state only once that reindex has itself completed.
 
 ## SLAs
 
@@ -63,6 +66,9 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 | Batch `failed` / `cancelled` | BL-009 | Cron job exit code |
 | Batch completed with some failed requests | Missing texts embed in real time during collection | Logged count |
 | Empty or broken checkout | BL-015 | Cron job exit code |
+| One table produces zero chunks this run | BL-016 | Logged, not an error |
+| Malformed `VOYAGE_BATCH_THRESHOLD` | Raises `ValueError`; only that namespace's sync fails (BL-017) | Logged per namespace, cron job continues |
+| Collecting reindex does not complete | Batch state and `last_commit_sha` left unchanged for retry (BL-018) | Logged, cron job continues |
 
 ## Acceptance criteria
 
@@ -81,6 +87,10 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 | AC-011 | Incremental sync embeds before deleting, commits once, and leaves the index untouched if embedding fails | BL-013 |
 | AC-012 | A full reindex prunes stale chunks only after every upsert, and a batch submission prunes nothing | BL-014 |
 | AC-013 | A full reindex of an empty checkout raises before touching the index | BL-015 |
+| AC-014 | `delete_chunks_except` returns 0 and deletes nothing when `keep_ids` is empty | BL-016 |
+| AC-015 | A full reindex with one table at zero chunks this run skips pruning that table | BL-016 |
+| AC-016 | A malformed `VOYAGE_BATCH_THRESHOLD` raises `ValueError`, caught per namespace by sync's loop | BL-017 |
+| AC-017 | The collecting reindex only advances `last_commit_sha` and clears batch state on its own success | BL-018 |
 
 ## Open questions
 
@@ -93,3 +103,4 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 | Date | Author | Change |
 |---|---|---|
 | 2026-10-11 | @julianam-w | Initial draft |
+| 2026-10-12 | @julianam-w | `/code-review --fix`: add BL-016..018 / AC-014..017 for a data-loss bug in table pruning, a `SystemExit` that broke per-namespace isolation, and an ungated state advance in the collecting reindex |
