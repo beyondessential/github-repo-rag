@@ -36,7 +36,7 @@ def test_ac_010_sql_backfill_hash_matches_python(conn):
     assert all(h == db.content_hash(text) for text, h in rows)
 
 
-def test_delete_chunks_except_keeps_only_given_ids(conn):
+def test_ac_012_delete_chunks_except_keeps_only_given_ids(conn):
     with conn.cursor() as cur:
         cur.execute("CREATE TEMP TABLE t_prune (id TEXT PRIMARY KEY)")
         cur.execute("INSERT INTO t_prune SELECT 'id' || g FROM generate_series(1, 100) g")

@@ -117,7 +117,11 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
             return
         # BL-007: real-time full reindex, reading batch results from the cache
         print(f"[{namespace}] Batches complete — running full reindex from cache")
-        # BL-018: only advance state if the reindex actually completed
+        # BL-018: only advance state if the reindex actually completed. ingest(use_batch=False)
+        # can only return True or raise — it never returns False — so this mirrors the gating
+        # at the other two full-reindex call sites rather than guarding a reachable path; a
+        # genuine failure here raises and is caught by main()'s per-namespace handler instead,
+        # leaving batch state untouched the same way.
         if not _full_reindex(repo_url, namespace, token, use_batch=False):
             print(f"[{namespace}] Full reindex from cache did not complete — retrying next run")
             return

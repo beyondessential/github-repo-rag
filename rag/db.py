@@ -33,7 +33,14 @@ def get_conn(database_url: str):
 
 
 def setup_table(conn, table: str) -> None:
-    """Create a single RAG table with HNSW, FTS, and file_path indexes."""
+    """Create a single RAG table with HNSW, FTS, file_path and content_hash indexes.
+
+    The column/backfill migration below runs only while content_hash is missing —
+    this is called on every ingest and sync tick (hourly, per namespace), and an
+    ALTER TABLE takes its lock before checking IF NOT EXISTS, so re-running it
+    unconditionally would repeat that lock acquisition against a live table the
+    MCP server concurrently reads, forever, for no effect after the first run.
+    """
     with conn.cursor() as cur:
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
         cur.execute(f"""
@@ -46,17 +53,28 @@ def setup_table(conn, table: str) -> None:
                 chunk_index INT NOT NULL DEFAULT 0
             )
         """)
-        cur.execute(f"""
-            ALTER TABLE {table}
-            ADD COLUMN IF NOT EXISTS chunk_index INT NOT NULL DEFAULT 0
-        """)
-        # content_hash lets re-indexing reuse an existing embedding for unchanged text.
-        # Backfilled in SQL; must match content_hash() below.
-        cur.execute(f"""
-            ALTER TABLE {table}
-            ADD COLUMN IF NOT EXISTS content_hash TEXT
-        """)
-        cur.execute(BACKFILL_HASH_SQL.format(table=table))
+        # BL-019: only migrate while content_hash is missing
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = %s AND column_name = 'content_hash'",
+            (table,),
+        )
+        if cur.fetchone() is None:
+            cur.execute(f"""
+                ALTER TABLE {table}
+                ADD COLUMN IF NOT EXISTS chunk_index INT NOT NULL DEFAULT 0
+            """)
+            # content_hash lets re-indexing reuse an existing embedding for unchanged text.
+            # Backfilled in SQL; must match content_hash() below.
+            cur.execute(f"""
+                ALTER TABLE {table}
+                ADD COLUMN IF NOT EXISTS content_hash TEXT
+            """)
+            cur.execute(BACKFILL_HASH_SQL.format(table=table))
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS {table}_content_hash_idx
+                ON {table} (content_hash)
+            """)
         cur.execute(f"""
             CREATE INDEX IF NOT EXISTS {table}_embedding_idx
             ON {table} USING hnsw (embedding vector_cosine_ops)
@@ -68,10 +86,6 @@ def setup_table(conn, table: str) -> None:
         cur.execute(f"""
             CREATE INDEX IF NOT EXISTS {table}_file_path_idx
             ON {table} (file_path)
-        """)
-        cur.execute(f"""
-            CREATE INDEX IF NOT EXISTS {table}_content_hash_idx
-            ON {table} (content_hash)
         """)
     conn.commit()
 
@@ -98,6 +112,7 @@ def get_embeddings_by_hash(conn, table: str, hashes: list[str]) -> dict[str, lis
             SELECT DISTINCT ON (content_hash) content_hash, embedding
             FROM {table}
             WHERE content_hash = ANY(%s)
+            ORDER BY content_hash, id
             """,
             (list(hashes),),
         )

@@ -201,7 +201,8 @@ def embed_chunks(conn, table: str, chunks: list[dict]) -> list[list[float]]:
         known.update({h: emb for (h, _), emb in zip(batch, embeddings, strict=True)})
 
     deduped = len(hashes) - reused - len(pending)
-    print(f"    {len(chunks)} chunks: {reused} reused, {deduped} deduped, {len(pending)} embedded")
+    # flush=True: a long reindex's only progress signal on a piped/cron log stream
+    print(f"    {len(chunks)} chunks: {reused} reused, {deduped} deduped, {len(pending)} embedded", flush=True)
     return [known[h] for h in hashes]
 
 
@@ -210,7 +211,7 @@ def index_chunks(conn, table: str, chunks: list[dict]) -> None:
     total_groups = (len(chunks) + INDEX_GROUP - 1) // INDEX_GROUP
     for i in range(0, len(chunks), INDEX_GROUP):
         group = chunks[i:i + INDEX_GROUP]
-        print(f"  Group {i // INDEX_GROUP + 1}/{total_groups}")
+        print(f"  Group {i // INDEX_GROUP + 1}/{total_groups}", flush=True)
         upsert_chunks(conn, table, group, embed_chunks(conn, table, group))
 
 
@@ -239,9 +240,12 @@ def replace_file_chunks(
     embeddings = {t: embed_chunks(conn, t, chunks) for t, chunks in by_table.items() if chunks}
 
     try:
-        total_deleted = sum(
-            delete_file_chunks(conn, tables, rel_path, commit=False) for rel_path in changed + deleted
-        )
+        total_deleted = 0
+        for rel_path in changed + deleted:
+            n = delete_file_chunks(conn, tables, rel_path, commit=False)
+            if n:
+                print(f"  Deleted {n} chunks for {rel_path}")
+            total_deleted += n
         for table, chunks in by_table.items():
             if chunks:
                 upsert_chunks(conn, table, chunks, embeddings[table], commit=False)
@@ -301,76 +305,78 @@ def ingest(repo_path: str, namespace: str, repo_url: str | None = None, use_batc
     tables = [code_table, docs_table]
 
     conn = get_conn(os.environ["DATABASE_URL"])
-    setup_db(conn, tables)
-    setup_meta_table(conn)
+    try:
+        setup_db(conn, tables)
+        setup_meta_table(conn)
 
-    repo_root = Path(repo_path).resolve()
-    print(f"Scanning {repo_root} (namespace: {namespace})...")
-    all_chunks: list[dict] = []
+        repo_root = Path(repo_path).resolve()
+        print(f"Scanning {repo_root} (namespace: {namespace})...")
+        all_chunks: list[dict] = []
 
-    for file_path in repo_root.rglob("*"):
-        if not file_path.is_file():
-            continue
-        rel = file_path.relative_to(repo_root)
-        if should_skip(rel):
-            continue
-        chunks = chunk_file(file_path, repo_root, namespace)
-        if chunks:
-            all_chunks.extend(chunks)
+        for file_path in repo_root.rglob("*"):
+            if not file_path.is_file():
+                continue
+            rel = file_path.relative_to(repo_root)
+            if should_skip(rel):
+                continue
+            chunks = chunk_file(file_path, repo_root, namespace)
+            if chunks:
+                all_chunks.extend(chunks)
 
-    code_chunks = [c for c in all_chunks if c["table"] == code_table]
-    doc_chunks = [c for c in all_chunks if c["table"] == docs_table]
-    print(f"Total: {len(all_chunks)} chunks ({len(code_chunks)} code, {len(doc_chunks)} docs)")
-    if not all_chunks:
-        # BL-015: guards the stale-chunk delete below from wiping the index after a bad checkout
+        code_chunks = [c for c in all_chunks if c["table"] == code_table]
+        doc_chunks = [c for c in all_chunks if c["table"] == docs_table]
+        print(f"Total: {len(all_chunks)} chunks ({len(code_chunks)} code, {len(doc_chunks)} docs)")
+        if not all_chunks:
+            # BL-015: guards the stale-chunk delete below from wiping the index after a bad checkout
+            raise RuntimeError(f"No indexable files found in {repo_root} — refusing to reindex '{namespace}'")
+
+        # BL-001: only full reindexes reach here with use_batch
+        # BL-002: large ones go via the Batch API
+        if use_batch:
+            texts = pending_texts(conn, tables, all_chunks)
+            threshold = batch_threshold()
+            print(f"{len(texts)} distinct texts need embedding (batch threshold {threshold})")
+            if len(texts) >= threshold:
+                submit_batches(conn, namespace, texts)
+                if repo_url:
+                    # No SHA, so the next sync collects the batch and does the full reindex
+                    register_namespace(conn, namespace, repo_url, None)
+                print("\nBatch submitted — scripts/sync.py will finish indexing once Voyage completes it.")
+                return False
+
+        for table, chunks in [(code_table, code_chunks), (docs_table, doc_chunks)]:
+            if not chunks:
+                continue
+            print(f"\nUpserting {len(chunks)} chunks to {table}...")
+            index_chunks(conn, table, chunks)
+
+        # BL-014: only after every upsert succeeded, drop chunks for removed or newly skipped files
+        # and chunk indexes past a file's new chunk count
+        # BL-016: a table with zero chunks this run is left untouched, not wiped
+        for table, chunks in [(code_table, code_chunks), (docs_table, doc_chunks)]:
+            if not chunks:
+                print(f"No chunks for {table} this run — leaving its existing chunks untouched")
+                continue
+            n = delete_chunks_except(conn, table, [c["id"] for c in chunks])
+            if n:
+                print(f"Removed {n} stale chunks from {table}")
+
+        if repo_url:
+            try:
+                sha = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], cwd=str(repo_root)
+                ).decode().strip()
+                register_namespace(conn, namespace, repo_url, sha)
+                print(f"Registered namespace '{namespace}' at {sha[:8]}")
+            except Exception as e:
+                print(f"Warning: could not register namespace: {e}")
+
+        print("\nIngestion complete.")
+        return True
+    finally:
+        # BL-020: guarantees the connection closes on every path, including an
+        # unhandled error from embedding, batch submission or pruning
         conn.close()
-        raise RuntimeError(f"No indexable files found in {repo_root} — refusing to reindex '{namespace}'")
-
-    # BL-001: only full reindexes reach here with use_batch
-    # BL-002: large ones go via the Batch API
-    if use_batch:
-        texts = pending_texts(conn, tables, all_chunks)
-        threshold = batch_threshold()
-        print(f"{len(texts)} distinct texts need embedding (batch threshold {threshold})")
-        if len(texts) >= threshold:
-            submit_batches(conn, namespace, texts)
-            if repo_url:
-                # No SHA, so the next sync collects the batch and does the full reindex
-                register_namespace(conn, namespace, repo_url, None)
-            conn.close()
-            print("\nBatch submitted — scripts/sync.py will finish indexing once Voyage completes it.")
-            return False
-
-    for table, chunks in [(code_table, code_chunks), (docs_table, doc_chunks)]:
-        if not chunks:
-            continue
-        print(f"\nUpserting {len(chunks)} chunks to {table}...")
-        index_chunks(conn, table, chunks)
-
-    # BL-014: only after every upsert succeeded, drop chunks for removed or newly skipped files
-    # and chunk indexes past a file's new chunk count
-    # BL-016: a table with zero chunks this run is left untouched, not wiped
-    for table, chunks in [(code_table, code_chunks), (docs_table, doc_chunks)]:
-        if not chunks:
-            print(f"No chunks for {table} this run — leaving its existing chunks untouched")
-            continue
-        n = delete_chunks_except(conn, table, [c["id"] for c in chunks])
-        if n:
-            print(f"Removed {n} stale chunks from {table}")
-
-    if repo_url:
-        try:
-            sha = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=str(repo_root)
-            ).decode().strip()
-            register_namespace(conn, namespace, repo_url, sha)
-            print(f"Registered namespace '{namespace}' at {sha[:8]}")
-        except Exception as e:
-            print(f"Warning: could not register namespace: {e}")
-
-    conn.close()
-    print("\nIngestion complete.")
-    return True
 
 
 def main() -> None:

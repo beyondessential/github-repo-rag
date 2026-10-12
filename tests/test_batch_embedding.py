@@ -191,7 +191,7 @@ def test_ac_006_failed_batch_drops_all_pending_rows_and_sync_raises(monkeypatch,
     assert sync_env["reindex"] == [] and sync_env["registered"] == []
 
 
-def test_submitted_full_reindex_does_not_advance_sha(monkeypatch, sync_env):
+def test_ac_002_too_large_diff_batch_submission_does_not_advance_sha(monkeypatch, sync_env):
     monkeypatch.setattr(sync, "get_pending_batches", lambda conn, ns: [])
     monkeypatch.setattr(sync, "get_changed_files", lambda *a: ([], [], True))
     monkeypatch.setattr(sync, "_full_reindex", lambda url, ns, token, use_batch=True: False)
@@ -243,3 +243,22 @@ def test_ac_017_collecting_reindex_does_not_advance_state_when_reindex_fails(mon
     sync.sync_namespace(FakeConn(), NS, None)
     assert sync_env["reindex"] == [False]
     assert sync_env["registered"] == [] and sync_env["deleted"] == [] and sync_env["cleared"] == []
+
+
+def test_ac_019_ingest_closes_connection_even_when_embedding_raises(monkeypatch, repo, db):
+    closed = []
+
+    class ClosingConn(FakeConn):
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(ingest, "get_conn", lambda url: ClosingConn())
+
+    def boom(texts, input_type):
+        raise RuntimeError("voyage down")
+
+    monkeypatch.setattr(ingest, "embed_batch", boom)
+
+    with pytest.raises(RuntimeError, match="voyage down"):
+        ingest.ingest(str(repo), "ns")
+    assert closed == [True]

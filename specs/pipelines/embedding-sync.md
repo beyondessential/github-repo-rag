@@ -49,6 +49,9 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 - **BL-016:** A table that produces zero chunks in a run is left untouched rather than pruned; an empty keep set is never read as "keep nothing".
 - **BL-017:** A malformed `VOYAGE_BATCH_THRESHOLD` fails only the namespace attempting a full reindex, not the whole sync run.
 - **BL-018:** The full reindex that collects a completed batch advances `last_commit_sha` and clears batch state only once that reindex has itself completed.
+- **BL-019:** A table's `content_hash` column, backfill and index are created only while the column is missing; once present, a later `setup_table` call does not repeat the migration.
+- **BL-020:** `ingest()` closes its database connection on every exit path, including an unhandled error partway through embedding, batch submission or pruning.
+- **BL-021:** Clearing a namespace's SHA to force a full reindex also clears any pending Voyage batch and cached embeddings recorded for it.
 
 ## SLAs
 
@@ -69,6 +72,7 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 | One table produces zero chunks this run | BL-016 | Logged, not an error |
 | Malformed `VOYAGE_BATCH_THRESHOLD` | Raises `ValueError`; only that namespace's sync fails (BL-017) | Logged per namespace, cron job continues |
 | Collecting reindex does not complete | Batch state and `last_commit_sha` left unchanged for retry (BL-018) | Logged, cron job continues |
+| Namespace stuck on an unresolvable pending batch | `register.py --sha ""` clears it (BL-021) | Manual operator action |
 
 ## Acceptance criteria
 
@@ -91,6 +95,9 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 | AC-015 | A full reindex with one table at zero chunks this run skips pruning that table | BL-016 |
 | AC-016 | A malformed `VOYAGE_BATCH_THRESHOLD` raises `ValueError`, caught per namespace by sync's loop | BL-017 |
 | AC-017 | The collecting reindex only advances `last_commit_sha` and clears batch state on its own success | BL-018 |
+| AC-018 | `setup_table`'s migration block runs only while `content_hash` is missing from the table | BL-019 |
+| AC-019 | `ingest()` closes its connection even when an embedding call raises | BL-020 |
+| AC-020 | `register.py --sha ""` clears the namespace's pending batch rows and cached embeddings; a real SHA leaves them untouched | BL-021 |
 
 ## Open questions
 
@@ -103,3 +110,4 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 | Date | Author | Change |
 |---|---|---|
 | 2026-10-12 | @julianam-w | Implemented: embedding reuse, Voyage Batch API full reindexes, index pruning, hourly sync. All ACs pass by automated test; AC-001, AC-002 and AC-005 also confirmed live against the real Voyage API and database |
+| 2026-10-12 | @julianam-w | Second `/code-review --fix` pass (8-angle): add BL-019..021 / AC-018..020 for a repeated-lock migration guard, a connection leak on error, and a `register.py` recovery path for a stuck pending batch |

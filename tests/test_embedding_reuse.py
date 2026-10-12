@@ -57,7 +57,7 @@ def test_ac_009_no_voyage_call_when_everything_is_stored(monkeypatch, voyage):
     assert voyage == []
 
 
-def test_splits_new_texts_into_voyage_sized_batches(monkeypatch, voyage):
+def test_ac_009_splits_new_texts_into_voyage_sized_batches(monkeypatch, voyage):
     monkeypatch.setattr(ingest, "get_embeddings_by_hash", lambda conn, table, hashes: {})
     chunks = [_chunk(f"t{i}", i=i) for i in range(ingest.EMBED_BATCH + 1)]
     ingest.embed_chunks(FakeConn(), "ns_code", chunks)
