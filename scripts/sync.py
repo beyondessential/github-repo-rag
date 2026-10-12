@@ -18,7 +18,6 @@ Environment variables:
 
 import argparse
 import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -36,7 +35,7 @@ from rag.db import (
     update_namespace_sha,
     upsert_chunks,
 )
-from rag.github import authed_clone_url, get_changed_files, get_latest_sha, parse_repo_url
+from rag.github import get_changed_files, get_latest_sha, parse_repo_url, shallow_clone
 from rag.query import embed_batch
 from scripts.ingest import EMBED_BATCH, chunk_file, ingest, should_skip
 
@@ -46,10 +45,7 @@ def _full_reindex(repo_url: str, namespace: str, token: str | None) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = os.path.join(tmpdir, "repo")
         print(f"  Cloning {repo_url} (shallow)...")
-        subprocess.run(
-            ["git", "clone", "--depth=1", authed_clone_url(repo_url, token), repo_path],
-            check=True,
-        )
+        shallow_clone(repo_url, repo_path, token)
         ingest(repo_path, namespace)  # repo_url omitted — caller handles SHA registration
 
 
@@ -106,10 +102,7 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = os.path.join(tmpdir, "repo")
         print(f"  Cloning {repo_url} (shallow)...")
-        subprocess.run(
-            ["git", "clone", "--depth=1", authed_clone_url(repo_url, token), repo_path],
-            check=True,
-        )
+        shallow_clone(repo_url, repo_path, token)
         repo_root = Path(repo_path)
 
         for rel_path in changed:
