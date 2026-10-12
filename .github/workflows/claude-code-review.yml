@@ -1,17 +1,20 @@
 name: Claude Code Review
 
+# Review runs on demand only: comment `/review` on a pull request to trigger it.
+# There is deliberately no `pull_request` trigger — to restore automatic review,
+# add one back under `on:` and prepend `github.event_name == 'pull_request' ||`
+# to the job's `if:` condition.
 on:
-  pull_request:
-    types: [opened, reopened, synchronize]
   issue_comment:
     types: [created]
 
 jobs:
   claude-review:
     if: >-
-      github.event_name == 'pull_request' ||
-        (github.event_name == 'issue_comment' &&
+      github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
-        contains(github.event.comment.body, '/review'))
+        contains(github.event.comment.body, '/review') &&
+        github.event.comment.author_association != 'NONE' &&
+        github.event.comment.author_association != 'FIRST_TIME_CONTRIBUTOR'
     uses: beyondessential/maui-team/.github/workflows/claude-code-review.yml@main
     secrets: inherit
