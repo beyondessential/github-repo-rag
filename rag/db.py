@@ -1,11 +1,17 @@
 """Database helpers: setup, upsert."""
 
+from __future__ import annotations
+
 import hashlib
 import re
+from typing import TYPE_CHECKING
 
 import psycopg2
 from pgvector.psycopg2 import register_vector
 from psycopg2.extras import execute_values
+
+if TYPE_CHECKING:
+    from rag.embeddings import EmbeddingModel
 
 
 def sanitise_namespace(namespace: str) -> str:
@@ -32,8 +38,14 @@ def get_conn(database_url: str):
     return conn
 
 
-def setup_table(conn, table: str) -> None:
+def setup_table(conn, table: str, dims: int = 1024) -> None:
     """Create a single RAG table with HNSW, FTS, file_path and content_hash indexes.
+
+    dims is only used on first creation — CREATE TABLE IF NOT EXISTS is a no-op against
+    an existing table, so this never changes an existing table's vector dimension. A
+    namespace's embedding model is fixed at ingest (see rag.db.register_namespace), so
+    this should only ever be called with the dims of the model a namespace is already
+    using. Inserting a vector of the wrong dimension is rejected by Postgres itself.
 
     The column/backfill migration below runs only while content_hash is missing —
     this is called on every ingest and sync tick (hourly, per namespace), and an
@@ -46,7 +58,7 @@ def setup_table(conn, table: str) -> None:
         cur.execute(f"""
             CREATE TABLE IF NOT EXISTS {table} (
                 id TEXT PRIMARY KEY,
-                embedding vector(1024) NOT NULL,
+                embedding vector({dims}) NOT NULL,
                 text TEXT NOT NULL,
                 file_path TEXT NOT NULL,
                 package TEXT NOT NULL DEFAULT '',
@@ -90,10 +102,10 @@ def setup_table(conn, table: str) -> None:
     conn.commit()
 
 
-def setup_db(conn, tables: list[str]) -> None:
-    """Create all RAG tables and indexes."""
+def setup_db(conn, tables: list[str], dims: int = 1024) -> None:
+    """Create all RAG tables and indexes. All of a namespace's tables share one model's dims."""
     for table in tables:
-        setup_table(conn, table)
+        setup_table(conn, table, dims=dims)
 
 
 # BL-011
@@ -197,7 +209,15 @@ def delete_chunks_except(conn, table: str, keep_ids: list[str]) -> int:
 # ── Namespace registry ────────────────────────────────────────────────────────
 
 def setup_meta_table(conn) -> None:
-    """Create the namespace registry table if it does not exist."""
+    """Create the namespace registry table if it does not exist.
+
+    The embedding_model migration below runs only while the column is missing, for
+    the same reason as setup_table()'s content_hash migration: this runs on every
+    ingest and sync tick, and an unconditional ALTER TABLE would repeat its lock
+    acquisition forever for no effect after the first run.
+    """
+    from rag.embeddings import DEFAULT_MODEL_NAME
+
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS rag_namespaces (
@@ -207,6 +227,17 @@ def setup_meta_table(conn) -> None:
                 last_indexed_at  TIMESTAMPTZ
             )
         """)
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'rag_namespaces' AND column_name = 'embedding_model'"
+        )
+        if cur.fetchone() is None:
+            # Existing namespaces were all indexed with voyage-code-3, the only model
+            # there was before this column existed.
+            cur.execute(f"""
+                ALTER TABLE rag_namespaces
+                ADD COLUMN IF NOT EXISTS embedding_model TEXT NOT NULL DEFAULT '{DEFAULT_MODEL_NAME}'
+            """)
         # Voyage Batch API state — see specs/pipelines/embedding-sync.md
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
         cur.execute("""
@@ -227,20 +258,42 @@ def setup_meta_table(conn) -> None:
     conn.commit()
 
 
-def register_namespace(conn, namespace: str, repo_url: str, commit_sha: str | None) -> None:
-    """Upsert a namespace entry with its latest indexed commit SHA."""
+def register_namespace(
+    conn, namespace: str, repo_url: str, commit_sha: str | None, embedding_model: str | None = None
+) -> None:
+    """Upsert a namespace entry with its latest indexed commit SHA.
+
+    BL-025: embedding_model is written only when given explicitly. Omitting it (the default)
+    leaves an existing namespace's recorded model untouched and a new one gets the
+    column default (voyage-code-3) — re-registering a SHA must never silently reset
+    which model a namespace is indexed with.
+    """
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO rag_namespaces (namespace, repo_url, last_commit_sha, last_indexed_at)
-            VALUES (%s, %s, %s, NOW())
-            ON CONFLICT (namespace) DO UPDATE SET
-                repo_url        = EXCLUDED.repo_url,
-                last_commit_sha = EXCLUDED.last_commit_sha,
-                last_indexed_at = NOW()
-            """,
-            (namespace, repo_url, commit_sha),
-        )
+        if embedding_model is not None:
+            cur.execute(
+                """
+                INSERT INTO rag_namespaces (namespace, repo_url, last_commit_sha, last_indexed_at, embedding_model)
+                VALUES (%s, %s, %s, NOW(), %s)
+                ON CONFLICT (namespace) DO UPDATE SET
+                    repo_url        = EXCLUDED.repo_url,
+                    last_commit_sha = EXCLUDED.last_commit_sha,
+                    last_indexed_at = NOW(),
+                    embedding_model = EXCLUDED.embedding_model
+                """,
+                (namespace, repo_url, commit_sha, embedding_model),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO rag_namespaces (namespace, repo_url, last_commit_sha, last_indexed_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (namespace) DO UPDATE SET
+                    repo_url        = EXCLUDED.repo_url,
+                    last_commit_sha = EXCLUDED.last_commit_sha,
+                    last_indexed_at = NOW()
+                """,
+                (namespace, repo_url, commit_sha),
+            )
     conn.commit()
 
 
@@ -248,10 +301,61 @@ def get_namespaces(conn) -> list[dict]:
     """Return all registered namespaces as a list of dicts."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT namespace, repo_url, last_commit_sha FROM rag_namespaces ORDER BY namespace"
+            "SELECT namespace, repo_url, last_commit_sha, embedding_model "
+            "FROM rag_namespaces ORDER BY namespace"
         )
         rows = cur.fetchall()
-    return [{"namespace": r[0], "repo_url": r[1], "last_commit_sha": r[2]} for r in rows]
+    return [
+        {"namespace": r[0], "repo_url": r[1], "last_commit_sha": r[2], "embedding_model": r[3]} for r in rows
+    ]
+
+
+def has_existing_chunks(conn, tables: list[str]) -> bool:
+    """True if any of the tables already has a row. A table that does not exist yet counts as empty.
+
+    BL-023: used to infer a namespace's model when it predates the embedding_model column, or was
+    never registered at all (ingested with no --repo, so rag_namespaces has no row for it)
+    — every such namespace is voyage-code-3, the only model that has ever existed before it.
+
+    Checks which tables exist up front rather than catching UndefinedTable, so a missing
+    table never rolls back other work a caller may already have done on this connection.
+    """
+    from rag.query import existing_tables
+
+    for table in existing_tables(conn, tables):
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT 1 FROM {table} LIMIT 1")
+            if cur.fetchone() is not None:
+                return True
+    return False
+
+
+def get_namespace_model(conn, namespace: str) -> str | None:
+    """The embedding model recorded for a namespace.
+
+    None if the namespace is not registered, or if rag_namespaces does not exist yet
+    (a namespace's _code/_docs tables can exist without it in principle, though the
+    current ingest path always creates both together).
+    """
+    import psycopg2.errors
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT embedding_model FROM rag_namespaces WHERE namespace = %s", (namespace,))
+            row = cur.fetchone()
+    except psycopg2.errors.UndefinedTable:
+        conn.rollback()
+        return None
+    return row[0] if row else None
+
+
+def resolve_model(conn, namespace: str) -> EmbeddingModel:
+    """The EmbeddingModel a namespace is indexed with, defaulting to voyage-code-3
+    (DEFAULT_MODEL_NAME) for a namespace with no recorded model.
+    """
+    from rag.embeddings import DEFAULT_MODEL_NAME, get_model
+
+    return get_model(get_namespace_model(conn, namespace) or DEFAULT_MODEL_NAME)
 
 
 def update_namespace_sha(conn, namespace: str, commit_sha: str) -> None:

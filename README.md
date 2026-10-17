@@ -87,6 +87,16 @@ To index a different repo, change `--repo` and `--namespace`:
 uv run python scripts/ingest.py --repo https://github.com/org/myrepo --namespace myrepo
 ```
 
+### Indexing with a different embedding model
+
+By default every namespace is embedded with `voyage-code-3`. Pass `--embedding-model` to use a different one from the registry in `rag/embeddings.py`:
+
+```bash
+uv run python scripts/ingest.py --repo https://github.com/org/myrepo --namespace myrepo_qwen06 --embedding-model qwen3-embedding-0.6b
+```
+
+A namespace is fixed to the model it was first ingested with — vectors from different models aren't comparable, so re-ingesting an existing namespace with a different model is refused. To compare models, index the same repo under separate namespaces, one per model (see [Evaluating retrieval](#evaluating-retrieval)). `qwen3-embedding-0.6b` needs `EMBEDDING_BASE_URL` set to an OpenAI-compatible embeddings endpoint (e.g. `ollama pull qwen3-embedding:0.6b`, then `EMBEDDING_BASE_URL=http://localhost:11434`).
+
 ## Querying
 
 ### MCP tool (Claude Code / Claude agents)
@@ -268,7 +278,7 @@ uv run python scripts/ingest.py . --namespace github_repo_rag
 uv run python scripts/eval_retrieval.py --questions evals/github-repo-rag.toml --namespaces github_repo_rag
 ```
 
-Pass several namespaces to `--namespaces` to score them on the same questions; the report then lists the questions on which they disagree. Questions are embedded with voyage-code-3, so every namespace compared must be indexed with that model. `--out results.json` writes per-question retrieved files, for reading through the misses.
+Pass several namespaces to `--namespaces` to score them on the same questions; each is queried with the embedding model it is registered with (`rag_namespaces.embedding_model`, see `AGENTS.md`), so namespaces indexed with different models compare meaningfully. The report then lists the questions on which they disagree. `--out results.json` writes per-question retrieved files, for reading through the misses.
 
 Write questions the way a developer would ask them, not using the identifiers the answer contains. Otherwise full-text search answers them alone and the embedding model is never tested.
 

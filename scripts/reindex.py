@@ -21,25 +21,27 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from rag.db import get_conn, sanitise_namespace, setup_db, setup_meta_table
+from rag.db import get_conn, resolve_model, sanitise_namespace, setup_db, setup_meta_table
 from scripts.ingest import replace_file_chunks
 
 
 def reindex(repo_path: str, namespace: str) -> None:
     namespace = sanitise_namespace(namespace)
     conn = get_conn(os.environ["DATABASE_URL"])
-    setup_db(conn, [f"{namespace}_code", f"{namespace}_docs"])
-    # embed_chunks reads rag_embedding_cache
-    setup_meta_table(conn)
-
-    changed = [f for f in os.environ.get("CHANGED_FILES", "").split() if f]
-    deleted = [f for f in os.environ.get("DELETED_FILES", "").split() if f]
-    print(f"Changed: {len(changed)} files, Deleted: {len(deleted)} files")
-
     try:
-        replace_file_chunks(conn, namespace, Path(repo_path).resolve(), changed, deleted)
+        # embed_chunks reads rag_embedding_cache; resolve_model reads rag_namespaces
+        setup_meta_table(conn)
+        model = resolve_model(conn, namespace)
+        setup_db(conn, [f"{namespace}_code", f"{namespace}_docs"], dims=model.dims)
+
+        changed = [f for f in os.environ.get("CHANGED_FILES", "").split() if f]
+        deleted = [f for f in os.environ.get("DELETED_FILES", "").split() if f]
+        print(f"Changed: {len(changed)} files, Deleted: {len(deleted)} files")
+
+        replace_file_chunks(conn, namespace, Path(repo_path).resolve(), changed, deleted, model)
     finally:
         conn.close()
     print("Reindex complete.")

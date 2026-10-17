@@ -16,14 +16,17 @@ search latency is that of one search_codebase-style query at the largest k.
 Modes: hybrid (what search_codebase returns), vector (embedding only) and fts (full-text
 only, the no-embedding baseline).
 
-Several namespaces are scored on identical questions. Every question is embedded with
-voyage-code-3, so the namespaces compared must be indexed with that model.
+Several namespaces are scored on identical questions. Each namespace is embedded and
+queried with the model it is registered with (rag_namespaces.embedding_model —
+voyage-code-3 if unregistered), so namespaces indexed with different embedding models
+compare meaningfully. The questions themselves are shared across namespaces regardless
+of model.
 
 Usage:
     uv run python scripts/eval_retrieval.py --questions evals/github-repo-rag.toml \\
         --namespaces github_repo_rag
     uv run python scripts/eval_retrieval.py --questions evals/tupaia.toml \\
-        --namespaces tupaia tupaia_small_chunks --k 6 20 --out eval-results.json
+        --namespaces tupaia tupaia_qwen06 --k 6 20 --out eval-results.json
 
 Question file (TOML):
     [[questions]]
@@ -32,8 +35,10 @@ Question file (TOML):
     files = ["scripts/sync.py"]         # an entry ending in "/" matches any file under it
 
 Environment variables:
-    DATABASE_URL    — PostgreSQL connection string
-    VOYAGE_API_KEY  — query embedding (hybrid and vector modes)
+    DATABASE_URL        — PostgreSQL connection string
+    VOYAGE_API_KEY      — query embedding for a voyage-code-3 namespace
+    EMBEDDING_BASE_URL  — query embedding for a namespace registered with an
+                          OpenAI-compatible model (see rag/embeddings.py)
 """
 
 from __future__ import annotations
@@ -45,7 +50,7 @@ import statistics
 import sys
 import time
 import tomllib
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -55,11 +60,13 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from rag.db import get_conn, sanitise_namespace
-from rag.query import SEARCH_MODES, embed, existing_tables, search
+from rag.db import get_conn, resolve_model, sanitise_namespace, setup_meta_table
+from rag.query import SEARCH_MODES, existing_tables, search
 
 if TYPE_CHECKING:
     import psycopg2.extensions
+
+    from rag.embeddings import EmbeddingModel
 
 DEFAULT_KS = [6, 20]
 
@@ -198,11 +205,13 @@ def evaluate(
     questions: list[Question],
     modes: list[str],
     ks: list[int],
-    embed_fn: Callable[..., list[float]] = embed,
+    model: EmbeddingModel,
 ) -> tuple[list[Outcome], list[float]]:
     """Run every question through every mode. Returns the outcomes and per-question embed times (ms).
 
     Each table is searched once at the largest k; smaller ks are prefixes of that ranking.
+    model embeds each question — it must be the model the namespace is indexed with
+    (see rag.db.resolve_model), since any other model's vectors are not comparable to it.
     """
     from pgvector import Vector
 
@@ -216,7 +225,7 @@ def evaluate(
         query_embedding = None
         if needs_embedding:
             start = time.perf_counter()
-            query_embedding = Vector(embed_fn(q.question, input_type="query"))
+            query_embedding = Vector(model.embed([q.question], "query")[0])
             embed_ms.append((time.perf_counter() - start) * 1000)
 
         for mode in modes:
@@ -253,14 +262,16 @@ def print_report(
     summaries: dict[tuple[str, str], dict],
     embed_times: dict[str, list[float]],
     namespaces: list[str],
+    models: dict[str, str],
     modes: list[str],
     ks: list[int],
     diffs: list[dict],
     n_questions: int,
 ) -> None:
     print(f"\n{n_questions} questions · k is per table (code + docs) · search ms is one query at k={max(ks)}\n")
+    labels = {ns: f"{ns} ({models[ns]})" for ns in namespaces}
     metric_cols = [c for k in ks for c in (f"hit@{k}", f"recall@{k}")] + ["mrr"]
-    width = max(len(ns) for ns in namespaces) + 2
+    width = max(len(label) for label in labels.values()) + 2
     for mode in modes:
         print(f"── {mode} ".ljust(60, "─"))
         print("namespace".ljust(width) + "".join(c.rjust(10) for c in metric_cols) + "search ms p50/p95".rjust(20))
@@ -268,7 +279,7 @@ def print_report(
             s = summaries[(ns, mode)]
             latency = f"{_fmt(s['search_ms_p50'])}/{_fmt(s['search_ms_p95'])}"
             cells = "".join(_fmt(s[c], ".3f" if c == "mrr" else ".0%").rjust(10) for c in metric_cols)
-            print(ns.ljust(width) + cells + latency.rjust(20))
+            print(labels[ns].ljust(width) + cells + latency.rjust(20))
         print()
 
     if any(embed_times.values()):
@@ -301,11 +312,18 @@ def main() -> None:
 
     conn = get_conn(os.environ["DATABASE_URL"])
     try:
+        setup_meta_table(conn)
         outcomes: list[Outcome] = []
         embed_times: dict[str, list[float]] = {}
+        models: dict[str, str] = {}
         for ns in namespaces:
-            print(f"Evaluating {ns} ({len(questions)} questions × {len(args.modes)} modes)...", flush=True)
-            ns_outcomes, embed_times[ns] = evaluate(conn, ns, questions, args.modes, ks)
+            model = resolve_model(conn, ns)
+            models[ns] = model.name
+            print(
+                f"Evaluating {ns} ({model.name}, {len(questions)} questions × {len(args.modes)} modes)...",
+                flush=True,
+            )
+            ns_outcomes, embed_times[ns] = evaluate(conn, ns, questions, args.modes, ks, model)
             outcomes.extend(ns_outcomes)
     finally:
         conn.close()
@@ -315,13 +333,14 @@ def main() -> None:
         for ns in namespaces for mode in args.modes
     }
     diffs = disagreements(outcomes, questions, min(ks))
-    print_report(summaries, embed_times, namespaces, args.modes, ks, diffs, len(questions))
+    print_report(summaries, embed_times, namespaces, models, args.modes, ks, diffs, len(questions))
 
     if args.out:
         by_id = {q.id: q for q in questions}
         args.out.write_text(json.dumps({
             "questions_file": str(args.questions),
             "ks": ks,
+            "models": models,
             "summaries": [{"namespace": ns, "mode": m, **s} for (ns, m), s in summaries.items()],
             "embed_ms": embed_times,
             "disagreements": diffs,

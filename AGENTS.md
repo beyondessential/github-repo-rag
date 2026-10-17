@@ -20,6 +20,7 @@ The MCP server does **retrieval only** — it never calls an LLM. The calling ag
 
 - `mcp_server.py` — FastMCP server; exposes `search_codebase`, `get_file`, `list_files`, `get_repo_structure`, `list_namespaces`, `namespace_info` tools
 - `rag/query.py` — `embed()` and `retrieve()` (hybrid pgvector search)
+- `rag/embeddings.py` — embedding model registry (`get_model`); a namespace is indexed and queried with exactly one model, recorded in `rag_namespaces.embedding_model`
 - `rag/db.py` — DB setup and upsert helpers
 - `rag/voyage_batch.py` — Voyage Batch API REST client used for large full reindexes (`specs/pipelines/embedding-sync.md`)
 - `rag/auth.py` — Google OAuth token verifier for HTTP transport
@@ -37,13 +38,17 @@ The MCP server does **retrieval only** — it never calls an LLM. The calling ag
 
 Each indexed repo gets a namespace (e.g. `tupaia`), creating `{namespace}_code` and `{namespace}_docs` tables. Namespace names are sanitised to valid PostgreSQL identifiers (e.g. `data-lake` → `data_lake`). Pass `namespace` to any tool to target the right repo.
 
+A namespace is indexed and queried with exactly one embedding model — vectors from different models are not comparable. The model is chosen at ingest (`ingest.py --embedding-model`), recorded in `rag_namespaces.embedding_model` (`voyage-code-3` by default) and resolved at query time via `rag.db.resolve_model()`; see `rag/embeddings.py` for the registry. `ingest()` refuses to re-ingest an existing namespace with a different model, including one that predates the registry (inferred from the namespace already having chunks). The batch cache (`rag_embedding_cache`) and the Voyage Batch API are read/used only for a model with `supports_batch_api`.
+
 ## Environment variables
 
 | Variable | Used by |
 |---|---|
 | `DATABASE_URL` | All DB operations |
-| `VOYAGE_API_KEY` | Embedding (ingest + query) |
+| `VOYAGE_API_KEY` | Embedding (ingest + query) for a voyage-code-3 namespace |
 | `VOYAGE_BATCH_THRESHOLD` | Sync / `ingest.py --batch` — new texts before a full reindex uses the Batch API (default 2000) |
+| `EMBEDDING_BASE_URL` | Query embedding for a namespace registered with an OpenAI-compatible model (`rag/embeddings.py`) |
+| `EMBEDDING_API_KEY` | Same, if that endpoint requires one |
 | `ANTHROPIC_API_KEY` | `scripts/ask.py` only — not required for MCP |
 | `GOOGLE_ALLOWED_DOMAIN` / `GOOGLE_ALLOWED_EMAILS` | HTTP transport auth (optional) |
 
