@@ -259,6 +259,19 @@ Two lower-level scripts back this:
 - `scripts/register.py` — register (or re-register) a namespace's baseline commit SHA without re-ingesting. Useful after a manual `ingest.py` run, or to clear the SHA and force a full reindex on the next sync.
 - `scripts/reindex.py` — re-embed an explicit set of changed/deleted files, given as `CHANGED_FILES` / `DELETED_FILES` (space-separated repo-relative paths). This is the primitive `sync.py` builds on; call it directly only if you already know exactly which files changed.
 
+## Evaluating retrieval
+
+`scripts/eval_retrieval.py` scores namespaces against a fixed set of questions, each listing the files that answer it (`evals/<repo>.toml`). It runs the same SQL as `search_codebase` in three modes: `hybrid` (what users get), `vector` (embedding only) and `fts` (full-text only, the no-embedding baseline). For each mode it reports hit@k, recall@k, MRR and latency. k is per table, as in `search_codebase`, and MRR ranks the code and docs tables separately, so an answer in either table counts the same.
+
+```bash
+uv run python scripts/ingest.py . --namespace github_repo_rag
+uv run python scripts/eval_retrieval.py --questions evals/github-repo-rag.toml --namespaces github_repo_rag
+```
+
+Pass several namespaces to `--namespaces` to score them on the same questions; the report then lists the questions on which they disagree. Questions are embedded with voyage-code-3, so every namespace compared must be indexed with that model. `--out results.json` writes per-question retrieved files, for reading through the misses.
+
+Write questions the way a developer would ask them, not using the identifiers the answer contains. Otherwise full-text search answers them alone and the embedding model is never tested.
+
 ## Deployment
 
 The MCP server and the scheduled sync run as two separate services in the same Railway project, sharing the internal Postgres instance.

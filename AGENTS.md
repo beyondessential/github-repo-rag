@@ -26,6 +26,7 @@ The MCP server does **retrieval only** — it never calls an LLM. The calling ag
 - `scripts/ingest.py` — ingest a repo into pgvector
 - `scripts/ask.py` — local CLI for full retrieve + answer pipeline (uses Anthropic API; dev convenience only)
 - `scripts/reindex.py` — re-embed an explicit list of changed/deleted files (the primitive `scripts/sync.py` builds on)
+- `scripts/eval_retrieval.py` — score namespaces against a question set (`evals/*.toml`) in hybrid, vector and FTS modes
 
 ## Transport modes
 
