@@ -1,0 +1,75 @@
+# Retrieval questions for github-repo-rag itself — a small smoke-test set.
+# Index this repo first:
+#   uv run python scripts/ingest.py . --namespace github_repo_rag
+# Phrase questions the way a developer would ask them, not with the identifiers
+# the answer contains, so the set measures semantic retrieval rather than keyword overlap.
+
+[[questions]]
+id = "sync-full-reindex"
+question = "When does the scheduled job give up on an incremental update and rebuild a whole repository's index?"
+files = ["scripts/sync.py"]
+
+[[questions]]
+id = "skip-in-flight-batch"
+question = "What happens to a repo whose bulk embedding job at the provider is still running when the hourly job fires?"
+files = ["scripts/sync.py", "specs/pipelines/embedding-sync.md"]
+
+[[questions]]
+id = "batch-file-limits"
+question = "How are very large sets of texts split up before uploading them for offline embedding?"
+files = ["rag/voyage_batch.py"]
+
+[[questions]]
+id = "reuse-unchanged-text"
+question = "How do we avoid paying to embed the same chunk text again when re-indexing?"
+files = ["scripts/ingest.py", "rag/db.py"]
+
+[[questions]]
+id = "prune-removed-files"
+question = "How are chunks for files that were deleted from the repository cleaned up after a full index?"
+files = ["rag/db.py", "scripts/ingest.py"]
+
+[[questions]]
+id = "namespace-identifier"
+question = "How is a repo name with dashes turned into a valid database table name?"
+files = ["rag/db.py"]
+
+[[questions]]
+id = "rank-fusion"
+question = "How are keyword search and similarity search results combined into one ranking?"
+files = ["rag/query.py"]
+
+[[questions]]
+id = "chunk-sizes"
+question = "How big are the pieces source files and documentation get cut into, and which file types are ignored?"
+files = ["scripts/ingest.py"]
+
+[[questions]]
+id = "monorepo-package"
+question = "How does indexing work out which JavaScript package a file belongs to?"
+files = ["scripts/ingest.py"]
+
+[[questions]]
+id = "private-repo-clone"
+question = "How is the access token supplied when cloning a private repository without exposing it in the process list?"
+files = ["rag/github.py"]
+
+[[questions]]
+id = "changed-files-between-commits"
+question = "How do we find which files changed between the last indexed commit and the latest one?"
+files = ["rag/github.py"]
+
+[[questions]]
+id = "read-whole-file"
+question = "Which tool returns a complete source file reassembled from its stored pieces?"
+files = ["mcp_server.py"]
+
+[[questions]]
+id = "force-full-reindex"
+question = "How can an operator force the next scheduled run to rebuild an index from scratch?"
+files = ["scripts/register.py", "README.md"]
+
+[[questions]]
+id = "http-auth"
+question = "How is access to the shared network server restricted to people in our Google Workspace?"
+files = ["mcp_server.py", "README.md"]

@@ -1,5 +1,7 @@
 # Environment
 .env
+.env.*
+!.env.example
 .venv
 
 # Local agent config (personal, not shared)
