@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-import psycopg2.errors
 import pytest
 
 from rag import query
@@ -34,6 +33,8 @@ files = ["./rag/db.py", "scripts\\\\sync.py", ".github/"]
     ('[[questions]]\nquestion = "q"\n', "non-empty 'files'"),
     ('[[questions]]\nquestion = "q"\nfiles = []\n', "non-empty 'files'"),
     ('[[questions]]\nquestion = " "\nfiles = ["a"]\n', "no 'question' text"),
+    ('questions = ["q"]\n', "must be an array of \\[\\[questions\\]\\] tables"),
+    ('[[questions]]\nquestion = "q"\nfiles = ["./"]\n', "non-empty 'files'"),
     ('[[questions]]\nid = "a"\nquestion = "q"\nfiles = ["x"]\n'
      '[[questions]]\nid = "a"\nquestion = "r"\nfiles = ["y"]\n', "duplicate question ids"),
 ])
@@ -69,33 +70,53 @@ def test_reciprocal_rank_uses_first_matching_file():
 
 
 def test_distinct_files_keeps_first_occurrence_order():
-    rows = [("t", "b.py", ""), ("t", "a.py", ""), ("t", "b.py", ""), ("t", "c.py", "")]
-    assert ev.distinct_files(rows) == ["b.py", "a.py", "c.py"]
+    assert ev.distinct_files(["b.py", "a.py", "b.py", "c.py"]) == ["b.py", "a.py", "c.py"]
 
 
-def test_summarise_aggregates_hit_recall_and_mrr():
+def test_files_at_takes_top_k_chunks_per_table_in_table_order():
+    o = ev.Outcome("1", "ns", "hybrid", {
+        "ns_code": ["a.py", "a.py", "b.py", "c.py"],
+        "ns_docs": ["README.md", "a.py", "spec.md"],
+    })
+    assert o.files_at(2) == ["a.py", "README.md"]
+    assert o.files_at(3) == ["a.py", "b.py", "README.md", "spec.md"]
+    assert o.files_at(4) == ["a.py", "b.py", "c.py", "README.md", "spec.md"]
+
+
+def test_best_reciprocal_rank_ranks_each_table_separately():
+    o = ev.Outcome("1", "ns", "hybrid", {
+        "ns_code": [f"src/{i}.py" for i in range(20)],
+        "ns_docs": ["README.md"],
+    })
+    # README.md is first in its own table, not behind 20 code files
+    assert o.best_reciprocal_rank(("README.md",)) == 1.0
+    assert o.best_reciprocal_rank(("src/2.py", "missing.md")) == pytest.approx(1 / 3)
+    assert o.best_reciprocal_rank(("missing.md",)) == 0.0
+
+
+def test_summarise_aggregates_hit_recall_mrr_and_latency():
     questions = [ev.Question("1", "q1", ("a.py", "b.py")), ev.Question("2", "q2", ("z.py",))]
     outcomes = [
-        ev.Outcome("1", "ns", "hybrid", {2: ["x.py", "a.py"], 5: ["x.py", "a.py", "b.py"]}, [10.0, 20.0]),
-        ev.Outcome("2", "ns", "hybrid", {2: ["x.py"], 5: ["x.py"]}, [30.0, 40.0]),
+        ev.Outcome("1", "ns", "hybrid", {"ns_code": ["x.py", "a.py", "b.py"]}, 10.0),
+        ev.Outcome("2", "ns", "hybrid", {"ns_code": ["x.py"]}, 30.0),
     ]
     s = ev.summarise(outcomes, questions, [2, 5])
     assert s["hit@2"] == 0.5 and s["recall@2"] == 0.25
     assert s["hit@5"] == 0.5 and s["recall@5"] == 0.5
     assert s["mrr"] == 0.25  # (1/2 + 0) / 2
-    assert s["search_ms_p50"] == 25.0
+    assert s["search_ms_p50"] == 20.0
 
 
 def test_disagreements_lists_only_questions_where_namespaces_differ():
     questions = [ev.Question("1", "q1", ("a.py",)), ev.Question("2", "q2", ("b.py",))]
     outcomes = [
-        ev.Outcome("1", "voyage", "vector", {6: ["a.py"]}),
-        ev.Outcome("1", "qwen", "vector", {6: ["x.py"]}),
-        ev.Outcome("2", "voyage", "vector", {6: ["b.py"]}),
-        ev.Outcome("2", "qwen", "vector", {6: ["b.py"]}),
+        ev.Outcome("1", "small_chunks", "vector", {"t": ["a.py"]}),
+        ev.Outcome("1", "large_chunks", "vector", {"t": ["x.py"]}),
+        ev.Outcome("2", "small_chunks", "vector", {"t": ["b.py"]}),
+        ev.Outcome("2", "large_chunks", "vector", {"t": ["b.py"]}),
     ]
     assert ev.disagreements(outcomes, questions, 6) == [
-        {"mode": "vector", "id": "1", "question": "q1", "hit": {"voyage": True, "qwen": False}},
+        {"mode": "vector", "id": "1", "question": "q1", "hit": {"small_chunks": True, "large_chunks": False}},
     ]
 
 
@@ -106,17 +127,18 @@ def fake_search(monkeypatch):
     calls: list[tuple] = []
 
     def search(conn, question, tables, top_k, query_embedding=None, mode="hybrid"):
-        calls.append((question, mode, top_k, query_embedding is not None))
-        return [("t", f"{mode}.py", "")] * top_k
+        [table] = tables
+        calls.append((question, table, mode, top_k, query_embedding is not None))
+        return [("text", f"{table}/{mode}/{i}.py", "") for i in range(top_k)]
 
     monkeypatch.setattr(ev, "search", search)
-    monkeypatch.setattr(ev, "namespace_tables", lambda conn, ns: [f"{ns}_code"])
+    monkeypatch.setattr(ev, "namespace_tables", lambda conn, ns: [f"{ns}_code", f"{ns}_docs"])
     return calls
 
 
-def test_evaluate_embeds_each_question_once_across_modes_and_ks(fake_search):
-    embedded: list[str] = []
-    questions = [ev.Question("1", "q1", ("hybrid.py",)), ev.Question("2", "q2", ("x.py",))]
+def test_evaluate_embeds_once_per_question_and_searches_each_table_once_at_max_k(fake_search):
+    embedded: list[tuple[str, str]] = []
+    questions = [ev.Question("1", "q1", ("x",)), ev.Question("2", "q2", ("y",))]
 
     outcomes, embed_ms = ev.evaluate(
         None, "ns", questions, ["hybrid", "vector", "fts"], [6, 20],
@@ -125,9 +147,12 @@ def test_evaluate_embeds_each_question_once_across_modes_and_ks(fake_search):
 
     assert embedded == [("q1", "query"), ("q2", "query")]
     assert len(embed_ms) == 2
-    assert len(fake_search) == 2 * 3 * 2  # questions × modes × ks
+    assert len(fake_search) == 2 * 3 * 2  # questions × modes × tables
+    assert {top_k for *_, top_k, _ in fake_search} == {20}
     assert len(outcomes) == 2 * 3
-    assert outcomes[0].ranked_files == {6: ["hybrid.py"], 20: ["hybrid.py"]}
+    first = outcomes[0]
+    assert list(first.table_files) == ["ns_code", "ns_docs"]
+    assert len(first.files_at(6)) == 12 and len(first.files_at(20)) == 40
 
 
 def test_evaluate_fts_only_never_embeds(fake_search):
@@ -136,7 +161,7 @@ def test_evaluate_fts_only_never_embeds(fake_search):
 
     outcomes, embed_ms = ev.evaluate(None, "ns", [ev.Question("1", "q", ("a",))], ["fts"], [6], embed_fn=no_embed)
     assert embed_ms == [] and len(outcomes) == 1
-    assert fake_search == [("q", "fts", 6, False)]
+    assert fake_search == [("q", "ns_code", "fts", 6, False), ("q", "ns_docs", "fts", 6, False)]
 
 
 # ── rag.query.search ──────────────────────────────────────────────────────────
@@ -146,10 +171,11 @@ class _Cursor:
         self.conn = conn
 
     def execute(self, sql, params) -> None:
+        if "to_regclass" in sql:
+            self.rows = [(t,) for t in params[0] if t not in self.conn.missing]
+            return
         table = sql.split("FROM ")[1].split()[0]
         self.conn.executed.append(table)
-        if table in self.conn.missing:
-            raise psycopg2.errors.UndefinedTable()
         self.rows = [("text", f"{table}.py", "")]
 
     def fetchall(self):
@@ -166,13 +192,9 @@ class _Conn:
     def __init__(self, missing=()) -> None:
         self.missing = set(missing)
         self.executed: list[str] = []
-        self.rollbacks = 0
 
     def cursor(self):
         return _Cursor(self)
-
-    def rollback(self) -> None:
-        self.rollbacks += 1
 
 
 def test_search_needs_an_embedding_outside_fts_mode():
@@ -180,11 +202,11 @@ def test_search_needs_an_embedding_outside_fts_mode():
         query.search(_Conn(), "q", ["t"], 6, mode="vector")
 
 
-def test_search_skips_a_missing_table_and_rolls_back():
+def test_search_never_queries_a_missing_table():
     conn = _Conn(missing={"ns_code"})
     rows = query.search(conn, "q", ["ns_code", "ns_docs"], 6, mode="fts")
     assert rows == [("text", "ns_docs.py", "")]
-    assert conn.executed == ["ns_code", "ns_docs"] and conn.rollbacks == 1
+    assert conn.executed == ["ns_docs"]
 
 
 def test_search_keeps_table_order():

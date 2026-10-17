@@ -7,20 +7,23 @@ the script runs the same SQL as search_codebase and reports, at each cut-off k:
 
     hit@k     share of questions where at least one expected file is retrieved
     recall@k  mean share of a question's expected files that are retrieved
-    MRR       mean reciprocal rank of the first expected file (at the largest k)
+    MRR       mean of 1 / the best rank an expected file reaches, ranking the code and docs
+              tables separately so an answer in either table counts the same
 
 k is per table, as in search_codebase: a k of 6 returns up to 6 code and 6 doc chunks.
+Each table is searched once at the largest k and cut down for the smaller ones, so the
+search latency is that of one search_codebase-style query at the largest k.
 Modes: hybrid (what search_codebase returns), vector (embedding only) and fts (full-text
 only, the no-embedding baseline).
 
-Index the same repo under several namespaces (one per embedding model) and pass them all
-to compare models on identical questions.
+Several namespaces are scored on identical questions. Every question is embedded with
+voyage-code-3, so the namespaces compared must be indexed with that model.
 
 Usage:
     uv run python scripts/eval_retrieval.py --questions evals/github-repo-rag.toml \\
         --namespaces github_repo_rag
     uv run python scripts/eval_retrieval.py --questions evals/tupaia.toml \\
-        --namespaces tupaia tupaia_qwen06 --k 6 20 --out eval-results.json
+        --namespaces tupaia tupaia_small_chunks --k 6 20 --out eval-results.json
 
 Question file (TOML):
     [[questions]]
@@ -42,8 +45,10 @@ import statistics
 import sys
 import time
 import tomllib
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
@@ -51,7 +56,10 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 from rag.db import get_conn, sanitise_namespace
-from rag.query import SEARCH_MODES, embed, search
+from rag.query import SEARCH_MODES, embed, existing_tables, search
+
+if TYPE_CHECKING:
+    import psycopg2.extensions
 
 DEFAULT_KS = [6, 20]
 
@@ -69,8 +77,19 @@ class Outcome:
     question_id: str
     namespace: str
     mode: str
-    ranked_files: dict[int, list[str]]  # k → distinct file paths in result order
-    search_ms: list[float] = field(default_factory=list)
+    table_files: dict[str, list[str]]  # table → each chunk's file path in rank order, at the largest k
+    search_ms: float = 0.0
+
+    def files_at(self, k: int) -> list[str]:
+        """Distinct files in each table's top k chunks, tables in order — what search_codebase returns."""
+        return distinct_files(path for paths in self.table_files.values() for path in paths[:k])
+
+    def best_reciprocal_rank(self, expected: tuple[str, ...]) -> float:
+        """Best reciprocal rank an expected file reaches within any one table's distinct files."""
+        return max(
+            (reciprocal_rank(expected, distinct_files(paths)) for paths in self.table_files.values()),
+            default=0.0,
+        )
 
 
 # ── Questions ─────────────────────────────────────────────────────────────────
@@ -81,6 +100,8 @@ def load_questions(path: Path) -> list[Question]:
         raw = tomllib.load(f).get("questions")
     if not raw:
         raise ValueError(f"{path}: no [[questions]] entries")
+    if not isinstance(raw, list) or not all(isinstance(entry, dict) for entry in raw):
+        raise ValueError(f"{path}: 'questions' must be an array of [[questions]] tables")
 
     questions: list[Question] = []
     for i, entry in enumerate(raw, start=1):
@@ -89,9 +110,12 @@ def load_questions(path: Path) -> list[Question]:
         files = entry.get("files", [])
         if not isinstance(text, str) or not text.strip():
             raise ValueError(f"{path}: question {qid} has no 'question' text")
-        if not isinstance(files, list) or not files or not all(isinstance(p, str) and p for p in files):
+        if not isinstance(files, list) or not all(isinstance(p, str) for p in files):
             raise ValueError(f"{path}: question {qid} needs a non-empty 'files' list of paths")
-        questions.append(Question(qid, text.strip(), tuple(_normalise(p) for p in files)))
+        normalised = tuple(_normalise(p) for p in files)
+        if not normalised or not all(normalised):
+            raise ValueError(f"{path}: question {qid} needs a non-empty 'files' list of paths")
+        questions.append(Question(qid, text.strip(), normalised))
 
     ids = [q.id for q in questions]
     duplicates = sorted({i for i in ids if ids.count(i) > 1})
@@ -128,26 +152,22 @@ def reciprocal_rank(expected: tuple[str, ...], files: list[str]) -> float:
     return 0.0
 
 
-def distinct_files(rows: list[tuple[str, str, str]]) -> list[str]:
-    """File paths from search rows, first occurrence order, duplicates dropped."""
-    seen: dict[str, None] = {}
-    for _, file_path, _ in rows:
-        seen.setdefault(file_path, None)
-    return list(seen)
+def distinct_files(paths: Iterable[str]) -> list[str]:
+    """File paths in first-occurrence order, duplicates dropped."""
+    return list(dict.fromkeys(paths))
 
 
 def summarise(outcomes: list[Outcome], questions: list[Question], ks: list[int]) -> dict:
-    """Aggregate hit@k, recall@k and MRR (at the largest k) over the questions."""
+    """Aggregate hit@k, recall@k, MRR and search latency over the questions."""
     by_id = {q.id: q for q in questions}
     n = len(outcomes)
     summary: dict = {}
     for k in ks:
-        recalls = [recall(by_id[o.question_id].files, o.ranked_files[k]) for o in outcomes]
+        recalls = [recall(by_id[o.question_id].files, o.files_at(k)) for o in outcomes]
         summary[f"hit@{k}"] = sum(r > 0 for r in recalls) / n
         summary[f"recall@{k}"] = sum(recalls) / n
-    top = max(ks)
-    summary["mrr"] = sum(reciprocal_rank(by_id[o.question_id].files, o.ranked_files[top]) for o in outcomes) / n
-    times = [ms for o in outcomes for ms in o.search_ms]
+    summary["mrr"] = sum(o.best_reciprocal_rank(by_id[o.question_id].files) for o in outcomes) / n
+    times = [o.search_ms for o in outcomes]
     summary["search_ms_p50"] = _percentile(times, 50)
     summary["search_ms_p95"] = _percentile(times, 95)
     return summary
@@ -163,29 +183,31 @@ def _percentile(values: list[float], pct: int) -> float | None:
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 
-def namespace_tables(conn, namespace: str) -> list[str]:
+def namespace_tables(conn: psycopg2.extensions.connection, namespace: str) -> list[str]:
     """The namespace's _code and _docs tables that exist; raises if neither does."""
     tables = [f"{namespace}_code", f"{namespace}_docs"]
-    with conn.cursor() as cur:
-        cur.execute("SELECT t FROM unnest(%s::text[]) t WHERE to_regclass(t) IS NOT NULL", (tables,))
-        found = {r[0] for r in cur.fetchall()}
+    found = existing_tables(conn, tables)
     if not found:
         raise SystemExit(f"Namespace '{namespace}' has no {tables[0]} or {tables[1]} table — ingest it first.")
-    return [t for t in tables if t in found]
+    return found
 
 
 def evaluate(
-    conn,
+    conn: psycopg2.extensions.connection,
     namespace: str,
     questions: list[Question],
     modes: list[str],
     ks: list[int],
-    embed_fn=embed,
+    embed_fn: Callable[..., list[float]] = embed,
 ) -> tuple[list[Outcome], list[float]]:
-    """Run every question through every mode. Returns the outcomes and per-question embed times (ms)."""
+    """Run every question through every mode. Returns the outcomes and per-question embed times (ms).
+
+    Each table is searched once at the largest k; smaller ks are prefixes of that ranking.
+    """
     from pgvector import Vector
 
     tables = namespace_tables(conn, namespace)
+    top = max(ks)
     needs_embedding = any(m != "fts" for m in modes)
     outcomes: list[Outcome] = []
     embed_ms: list[float] = []
@@ -198,13 +220,13 @@ def evaluate(
             embed_ms.append((time.perf_counter() - start) * 1000)
 
         for mode in modes:
-            outcome = Outcome(q.id, namespace, mode, ranked_files={})
-            for k in ks:
-                start = time.perf_counter()
-                rows = search(conn, q.question, tables, k, query_embedding, mode=mode)
-                outcome.search_ms.append((time.perf_counter() - start) * 1000)
-                outcome.ranked_files[k] = distinct_files(rows)
-            outcomes.append(outcome)
+            table_files: dict[str, list[str]] = {}
+            start = time.perf_counter()
+            for table in tables:
+                rows = search(conn, q.question, [table], top, query_embedding, mode=mode)
+                table_files[table] = [file_path for _, file_path, _ in rows]
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            outcomes.append(Outcome(q.id, namespace, mode, table_files, elapsed_ms))
 
     return outcomes, embed_ms
 
@@ -214,7 +236,7 @@ def disagreements(outcomes: list[Outcome], questions: list[Question], k: int) ->
     by_id = {q.id: q for q in questions}
     grouped: dict[tuple[str, str], dict[str, bool]] = {}
     for o in outcomes:
-        hit = recall(by_id[o.question_id].files, o.ranked_files[k]) > 0
+        hit = recall(by_id[o.question_id].files, o.files_at(k)) > 0
         grouped.setdefault((o.mode, o.question_id), {})[o.namespace] = hit
     return [
         {"mode": mode, "id": qid, "question": by_id[qid].question, "hit": hits}
@@ -236,7 +258,7 @@ def print_report(
     diffs: list[dict],
     n_questions: int,
 ) -> None:
-    print(f"\n{n_questions} questions · k is per table (code + docs)\n")
+    print(f"\n{n_questions} questions · k is per table (code + docs) · search ms is one query at k={max(ks)}\n")
     metric_cols = [c for k in ks for c in (f"hit@{k}", f"recall@{k}")] + ["mrr"]
     width = max(len(ns) for ns in namespaces) + 2
     for mode in modes:
@@ -274,7 +296,7 @@ def main() -> None:
     if any(k < 1 for k in args.ks):
         parser.error("--k values must be positive")
     ks = sorted(set(args.ks))
-    namespaces = [sanitise_namespace(ns) for ns in args.namespaces]
+    namespaces = list(dict.fromkeys(sanitise_namespace(ns) for ns in args.namespaces))
     questions = load_questions(args.questions)
 
     conn = get_conn(os.environ["DATABASE_URL"])
@@ -310,10 +332,10 @@ def main() -> None:
                     "expected": list(by_id[o.question_id].files),
                     "namespace": o.namespace,
                     "mode": o.mode,
-                    "retrieved": {str(k): files for k, files in o.ranked_files.items()},
-                    "recall": {
-                        str(k): recall(by_id[o.question_id].files, files) for k, files in o.ranked_files.items()
-                    },
+                    "retrieved": {str(k): o.files_at(k) for k in ks},
+                    "recall": {str(k): recall(by_id[o.question_id].files, o.files_at(k)) for k in ks},
+                    "reciprocal_rank": o.best_reciprocal_rank(by_id[o.question_id].files),
+                    "chunks_by_table": o.table_files,
                 }
                 for o in outcomes
             ],

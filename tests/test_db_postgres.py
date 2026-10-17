@@ -58,7 +58,7 @@ def test_ac_014_delete_chunks_except_is_a_noop_on_empty_keep_ids(conn):
 # ── rag.query.search SQL ──────────────────────────────────────────────────────
 
 def _chunk_table(conn, name: str, rows: list[tuple[str, str]], with_vector: bool = False) -> None:
-    """Commit a temp chunk table so a rollback inside search() does not drop it."""
+    """Create a temp chunk table, left uncommitted in the caller's transaction."""
     vector_col = ", embedding vector(3)" if with_vector else ""
     with conn.cursor() as cur:
         cur.execute(f"CREATE TEMP TABLE {name} (id TEXT, text TEXT, file_path TEXT, package TEXT{vector_col})")
@@ -66,10 +66,9 @@ def _chunk_table(conn, name: str, rows: list[tuple[str, str]], with_vector: bool
             cur.execute(
                 f"INSERT INTO {name} (id, text, file_path, package) VALUES (%s, %s, %s, '')", (str(i), text, path)
             )
-    conn.commit()
 
 
-def test_search_fts_ranks_by_text_match_and_survives_a_missing_table(conn):
+def test_search_fts_ranks_by_text_match_and_skips_a_missing_table(conn):
     from rag.query import search
 
     _chunk_table(conn, "t_search_docs", [
@@ -79,6 +78,10 @@ def test_search_fts_ranks_by_text_match_and_survives_a_missing_table(conn):
     ])
     rows = search(conn, "embedding cache", ["t_missing_code", "t_search_docs"], 5, mode="fts")
     assert [r[1] for r in rows] == ["busy.md", "light.md"]
+    # The caller's uncommitted work survives the missing table
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM t_search_docs")
+        assert cur.fetchone()[0] == 3
 
 
 def test_search_vector_and_hybrid_sql_run_against_pgvector(conn):
@@ -99,7 +102,6 @@ def test_search_vector_and_hybrid_sql_run_against_pgvector(conn):
         cur.execute(
             "UPDATE t_search_vec SET embedding = (CASE file_path WHEN 'a.py' THEN '[1,0,0]' ELSE '[0,1,0]' END)::vector"
         )
-    conn.commit()
 
     near_b = Vector([0.1, 1.0, 0.0])
     assert [r[1] for r in search(conn, "text", ["t_search_vec"], 2, near_b, mode="vector")] == ["b.py", "a.py"]

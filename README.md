@@ -261,14 +261,14 @@ Two lower-level scripts back this:
 
 ## Evaluating retrieval
 
-`scripts/eval_retrieval.py` scores namespaces against a fixed set of questions, each listing the files that answer it (`evals/<repo>.toml`). It runs the same SQL as `search_codebase` in three modes: `hybrid` (what users get), `vector` (embedding only) and `fts` (full-text only, the no-embedding baseline). For each mode it reports hit@k, recall@k, MRR and latency, where k is per table, as in `search_codebase`.
+`scripts/eval_retrieval.py` scores namespaces against a fixed set of questions, each listing the files that answer it (`evals/<repo>.toml`). It runs the same SQL as `search_codebase` in three modes: `hybrid` (what users get), `vector` (embedding only) and `fts` (full-text only, the no-embedding baseline). For each mode it reports hit@k, recall@k, MRR and latency. k is per table, as in `search_codebase`, and MRR ranks the code and docs tables separately, so an answer in either table counts the same.
 
 ```bash
 uv run python scripts/ingest.py . --namespace github_repo_rag
 uv run python scripts/eval_retrieval.py --questions evals/github-repo-rag.toml --namespaces github_repo_rag
 ```
 
-To compare embedding models, index the same repo under one namespace per model and pass them all to `--namespaces`. The report then lists the questions on which the namespaces disagree. `--out results.json` writes per-question retrieved files, for reading through the misses.
+Pass several namespaces to `--namespaces` to score them on the same questions; the report then lists the questions on which they disagree. Questions are embedded with voyage-code-3, so every namespace compared must be indexed with that model. `--out results.json` writes per-question retrieved files, for reading through the misses.
 
 Write questions the way a developer would ask them, not using the identifiers the answer contains. Otherwise full-text search answers them alone and the embedding model is never tested.
 

@@ -2,10 +2,16 @@
 Query pipeline: embed → hybrid retrieve from pgvector.
 """
 
+from __future__ import annotations
+
 import os
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import voyageai
+
+if TYPE_CHECKING:
+    import psycopg2.extensions
+    from pgvector import Vector
 
 _DEFAULT_TABLES = ["tupaia_code", "tupaia_docs"]
 
@@ -83,35 +89,37 @@ def embed_batch(texts: list[str], input_type: str = "document") -> list[list[flo
     return result.embeddings
 
 
+def existing_tables(conn: psycopg2.extensions.connection, tables: list[str]) -> list[str]:
+    """The given tables that exist, in the order given."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT t FROM unnest(%s::text[]) t WHERE to_regclass(t) IS NOT NULL", (tables,))
+        found = {r[0] for r in cur.fetchall()}
+    return [t for t in tables if t in found]
+
+
 def search(
-    conn,
+    conn: psycopg2.extensions.connection,
     question: str,
     tables: list[str],
     top_k: int,
-    query_embedding=None,
+    query_embedding: Vector | None = None,
     mode: SearchMode = "hybrid",
 ) -> list[tuple[str, str, str]]:
     """Return (text, file_path, package) rows: up to top_k per table, tables in the order given.
 
     query_embedding (a pgvector Vector) is required for the hybrid and vector modes.
-    A table that does not exist yet contributes no rows.
+    A table that does not exist yet (a namespace with no docs, say) contributes no rows.
+    Ties aside, each table's rows for a smaller top_k are a prefix of its rows for a larger one.
     """
-    import psycopg2.errors
-
     if mode != "fts" and query_embedding is None:
         raise ValueError(f"mode {mode!r} needs a query_embedding")
 
     params = {"embedding": query_embedding, "question": question, "top_k": top_k}
     rows: list[tuple[str, str, str]] = []
-    for table in tables:
-        try:
-            with conn.cursor() as cur:
-                cur.execute(_SQL_BY_MODE[mode].format(table=table), params)
-                rows.extend(cur.fetchall())
-        except psycopg2.errors.UndefinedTable:
-            # A namespace's _docs or _code table may not exist yet. Roll back so
-            # the aborted transaction does not fail the remaining tables.
-            conn.rollback()
+    for table in existing_tables(conn, tables):
+        with conn.cursor() as cur:
+            cur.execute(_SQL_BY_MODE[mode].format(table=table), params)
+            rows.extend(cur.fetchall())
     return rows
 
 
@@ -135,8 +143,8 @@ def retrieve(
 
     query_embedding = Vector(embed(question, input_type="query"))
     conn = psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=10)
-    register_vector(conn)
     try:
+        register_vector(conn)
         rows = search(conn, question, tables, top_k, query_embedding)
     finally:
         conn.close()
