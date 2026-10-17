@@ -268,7 +268,7 @@ uv run python scripts/ingest.py . --namespace github_repo_rag
 uv run python scripts/eval_retrieval.py --questions evals/github-repo-rag.toml --namespaces github_repo_rag
 ```
 
-Pass several namespaces to `--namespaces` to score them on the same questions; the report then lists the questions on which they disagree. Questions are embedded with voyage-code-3, so every namespace compared must be indexed with that model. `--out results.json` writes per-question retrieved files, for reading through the misses.
+Pass several namespaces to `--namespaces` to score them on the same questions; each is queried with the embedding model it is registered with (`rag_namespaces.embedding_model`, see `AGENTS.md`), so namespaces indexed with different models compare meaningfully. The report then lists the questions on which they disagree. `--out results.json` writes per-question retrieved files, for reading through the misses.
 
 Write questions the way a developer would ask them, not using the identifiers the answer contains. Otherwise full-text search answers them alone and the embedding model is never tested.
 

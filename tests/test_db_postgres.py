@@ -106,3 +106,32 @@ def test_search_vector_and_hybrid_sql_run_against_pgvector(conn):
     near_b = Vector([0.1, 1.0, 0.0])
     assert [r[1] for r in search(conn, "text", ["t_search_vec"], 2, near_b, mode="vector")] == ["b.py", "a.py"]
     assert [r[1] for r in search(conn, "beta", ["t_search_vec"], 1, near_b, mode="hybrid")] == ["b.py"]
+
+
+# ── rag_namespaces.embedding_model ──────────────────────────────────────────────
+
+def test_register_and_resolve_model_round_trip(conn):
+    from rag.embeddings import DEFAULT_MODEL_NAME
+
+    namespace = "t_embedding_model_ns"
+    db.setup_meta_table(conn)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM rag_namespaces WHERE namespace = %s", (namespace,))
+    conn.commit()
+    try:
+        # No embedding_model given: a new row gets the column default
+        db.register_namespace(conn, namespace, "https://example.com/r", "sha1")
+        assert db.get_namespace_model(conn, namespace) == DEFAULT_MODEL_NAME
+        assert db.resolve_model(conn, namespace).name == DEFAULT_MODEL_NAME
+
+        # Re-registering a SHA without embedding_model leaves the recorded model alone
+        db.register_namespace(conn, namespace, "https://example.com/r", "sha1", embedding_model="qwen3-embedding-0.6b")
+        db.register_namespace(conn, namespace, "https://example.com/r", "sha2")
+        assert db.get_namespace_model(conn, namespace) == "qwen3-embedding-0.6b"
+
+        assert db.get_namespace_model(conn, "t_never_registered") is None
+        assert db.resolve_model(conn, "t_never_registered").name == DEFAULT_MODEL_NAME
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM rag_namespaces WHERE namespace = %s", (namespace,))
+        conn.commit()

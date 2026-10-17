@@ -24,9 +24,12 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 import anthropic
+
+from rag.db import get_conn, resolve_model, setup_meta_table
 from rag.query import retrieve
 
 _MODEL = "claude-sonnet-4-20250514"
@@ -45,7 +48,13 @@ def answer(
     namespace: str = "tupaia",
 ) -> str:
     tables = [f"{namespace}_code", f"{namespace}_docs"]
-    context = retrieve(question, tables=tables)
+    conn = get_conn(os.environ["DATABASE_URL"])
+    try:
+        setup_meta_table(conn)
+        model = resolve_model(conn, namespace)
+    finally:
+        conn.close()
+    context = retrieve(question, tables=tables, model=model)
     prefix = system_prompt or _DEFAULT_SYSTEM
     system = f"{prefix}\n\n## Retrieved context\n\n{context}"
 

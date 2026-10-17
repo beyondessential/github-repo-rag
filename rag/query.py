@@ -7,11 +7,13 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Literal
 
-import voyageai
+from rag.embeddings import DEFAULT_MODEL_NAME, get_model
 
 if TYPE_CHECKING:
     import psycopg2.extensions
     from pgvector import Vector
+
+    from rag.embeddings import EmbeddingModel
 
 _DEFAULT_TABLES = ["tupaia_code", "tupaia_docs"]
 
@@ -77,16 +79,12 @@ _SQL_BY_MODE = {"hybrid": _HYBRID_SQL, "vector": _VECTOR_SQL, "fts": _FTS_SQL}
 
 def embed(text: str, input_type: str = "query") -> list[float]:
     """Embed a single text using voyage-code-3."""
-    client = voyageai.Client(api_key=os.environ["VOYAGE_API_KEY"])
-    result = client.embed([text], model="voyage-code-3", input_type=input_type)
-    return result.embeddings[0]
+    return get_model(DEFAULT_MODEL_NAME).embed([text], input_type)[0]
 
 
 def embed_batch(texts: list[str], input_type: str = "document") -> list[list[float]]:
-    """Embed a batch of texts (max 128 per call for voyage-code-3)."""
-    client = voyageai.Client(api_key=os.environ["VOYAGE_API_KEY"])
-    result = client.embed(texts, model="voyage-code-3", input_type=input_type)
-    return result.embeddings
+    """Embed a batch of texts using voyage-code-3 (max 128 per call)."""
+    return get_model(DEFAULT_MODEL_NAME).embed(texts, input_type)
 
 
 def existing_tables(conn: psycopg2.extensions.connection, tables: list[str]) -> list[str]:
@@ -127,12 +125,17 @@ def retrieve(
     question: str,
     tables: list[str] | None = None,
     top_k: int = 6,
+    model: EmbeddingModel | None = None,
 ) -> str:
     """
     Hybrid search (vector + FTS with RRF) across the given tables.
     Returns a formatted context string, or a setup hint if empty.
 
     tables: DB table names to search. Defaults to ['tupaia_code', 'tupaia_docs'].
+    model:  Embedding model to embed the question with. Defaults to voyage-code-3 —
+            callers that know which model a namespace was indexed with (see
+            rag.db.resolve_model) should pass it explicitly, since querying with the
+            wrong model silently returns meaningless results.
     """
     import psycopg2
     from pgvector import Vector
@@ -140,8 +143,9 @@ def retrieve(
 
     if tables is None:
         tables = _DEFAULT_TABLES
+    model = model or get_model(DEFAULT_MODEL_NAME)
 
-    query_embedding = Vector(embed(question, input_type="query"))
+    query_embedding = Vector(model.embed([question], "query")[0])
     conn = psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=10)
     try:
         register_vector(conn)
