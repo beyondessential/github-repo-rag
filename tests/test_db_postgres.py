@@ -135,3 +135,14 @@ def test_register_and_resolve_model_round_trip(conn):
         with conn.cursor() as cur:
             cur.execute("DELETE FROM rag_namespaces WHERE namespace = %s", (namespace,))
         conn.commit()
+
+
+# ── has_existing_chunks ──────────────────────────────────────────────────────────
+
+def test_has_existing_chunks_true_only_once_a_table_has_a_row(conn):
+    with conn.cursor() as cur:
+        cur.execute("CREATE TEMP TABLE t_chunks_empty (id TEXT)")
+        cur.execute("CREATE TEMP TABLE t_chunks_full (id TEXT)")
+        cur.execute("INSERT INTO t_chunks_full VALUES ('a')")
+    assert db.has_existing_chunks(conn, ["t_missing", "t_chunks_empty"]) is False
+    assert db.has_existing_chunks(conn, ["t_missing", "t_chunks_full"]) is True

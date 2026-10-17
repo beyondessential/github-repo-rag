@@ -134,7 +134,7 @@ def test_resolve_model_defaults_to_voyage_for_an_unregistered_namespace(row, exp
     assert model.name == expected
 
 
-def test_register_namespace_without_embedding_model_leaves_it_untouched_on_conflict():
+def test_ac_024_register_namespace_without_embedding_model_leaves_it_untouched_on_conflict():
     conn = _RowConn()
     db.register_namespace(conn, "ns", "https://example.com/r", "sha1")
     sql, params = conn._cursor.executed[0]
@@ -143,7 +143,7 @@ def test_register_namespace_without_embedding_model_leaves_it_untouched_on_confl
     assert conn.commits == 1
 
 
-def test_register_namespace_with_embedding_model_sets_it_on_insert_and_conflict():
+def test_ac_024_register_namespace_with_embedding_model_sets_it_on_insert_and_conflict():
     conn = _RowConn()
     db.register_namespace(conn, "ns", "https://example.com/r", "sha1", embedding_model="qwen3-embedding-0.6b")
     sql, params = conn._cursor.executed[0]

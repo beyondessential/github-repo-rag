@@ -87,6 +87,16 @@ To index a different repo, change `--repo` and `--namespace`:
 uv run python scripts/ingest.py --repo https://github.com/org/myrepo --namespace myrepo
 ```
 
+### Indexing with a different embedding model
+
+By default every namespace is embedded with `voyage-code-3`. Pass `--embedding-model` to use a different one from the registry in `rag/embeddings.py`:
+
+```bash
+uv run python scripts/ingest.py --repo https://github.com/org/myrepo --namespace myrepo_qwen06 --embedding-model qwen3-embedding-0.6b
+```
+
+A namespace is fixed to the model it was first ingested with — vectors from different models aren't comparable, so re-ingesting an existing namespace with a different model is refused. To compare models, index the same repo under separate namespaces, one per model (see [Evaluating retrieval](#evaluating-retrieval)). `qwen3-embedding-0.6b` needs `EMBEDDING_BASE_URL` set to an OpenAI-compatible embeddings endpoint (e.g. `ollama pull qwen3-embedding:0.6b`, then `EMBEDDING_BASE_URL=http://localhost:11434`).
+
 ## Querying
 
 ### MCP tool (Claude Code / Claude agents)

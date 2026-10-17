@@ -13,20 +13,20 @@
 | **Trigger** | Railway cron (sync) / manual (ingest, reindex) |
 | **Schedule** | `0 * * * *` (hourly, Railway cron service) |
 | **Created** | 2026-10-11 |
-| **Last updated** | 2026-10-12 |
+| **Last updated** | 2026-10-17 |
 
 ## Purpose
 
-Keep each namespace's index in step with its repo while minimising Voyage spend. Text that already has an embedding is never re-embedded. Large full reindexes go through the Voyage Batch API, which costs 33% less than real-time `/v1/embeddings` but can take up to 12 hours. Incremental syncs stay real time so the index stays fresh. Full reindexes also remove chunks the repo no longer produces.
+Keep each namespace's index in step with its repo while minimising Voyage spend. Text that already has an embedding is never re-embedded. Large full reindexes go through the Voyage Batch API, which costs 33% less than real-time `/v1/embeddings` but can take up to 12 hours. Incremental syncs stay real time so the index stays fresh. Full reindexes also remove chunks the repo no longer produces. A namespace is indexed with exactly one embedding model, chosen at ingest and never changed implicitly.
 
 ## Inputs
 
-- **External sources:** Voyage `/v1/embeddings`, Files API (`/v1/files`) and Batch API (`/v1/batches`) over HTTPS; GitHub clone and compare API.
-- **Required configuration:** `VOYAGE_API_KEY`, `DATABASE_URL`; optional `VOYAGE_BATCH_THRESHOLD`, `GITHUB_TOKEN`.
+- **External sources:** Voyage `/v1/embeddings`, Files API (`/v1/files`) and Batch API (`/v1/batches`) over HTTPS; GitHub clone and compare API; an OpenAI-compatible `/v1/embeddings` endpoint for a non-Voyage model (`rag/embeddings.py`).
+- **Required configuration:** `VOYAGE_API_KEY`, `DATABASE_URL`; optional `VOYAGE_BATCH_THRESHOLD`, `GITHUB_TOKEN`, `EMBEDDING_BASE_URL`/`EMBEDDING_API_KEY` (only for a namespace indexed with a non-Voyage model).
 
 ## Outputs
 
-- **Tables:** `{namespace}_code` / `{namespace}_docs` (now with `content_hash`), `rag_pending_batches` (one row per in-flight batch), `rag_embedding_cache` (batch results awaiting upsert).
+- **Tables:** `{namespace}_code` / `{namespace}_docs` (now with `content_hash`), `rag_pending_batches` (one row per in-flight batch), `rag_embedding_cache` (batch results awaiting upsert, Voyage-only), `rag_namespaces` (now with `embedding_model`).
 - **Downstream consumers:** MCP server search (reads the namespace tables only).
 
 ## Processing logic
@@ -52,6 +52,10 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 - **BL-019:** A table's `content_hash` column, backfill and index are created only while the column is missing; once present, a later `setup_table` call does not repeat the migration.
 - **BL-020:** `ingest()` closes its database connection on every exit path, including an unhandled error partway through embedding, batch submission or pruning.
 - **BL-021:** Clearing a namespace's SHA to force a full reindex also clears any pending Voyage batch and cached embeddings recorded for it.
+- **BL-022:** `ingest()` resolves `--embedding-model` to a registered model before opening a database connection, raising for an unregistered name.
+- **BL-023:** A namespace is indexed and queried with exactly one embedding model; `ingest()` refuses to proceed when the requested model differs from the namespace's recorded one, or, for a namespace with existing chunks but no recorded model, from `voyage-code-3` — the only model that existed before this column.
+- **BL-024:** `rag_embedding_cache` and the Voyage Batch API are read and used only for a model whose `supports_batch_api` is true; requesting the Batch API for any other model has no effect on sync's opportunistic attempt, and the `ingest.py --batch` CLI flag refuses outright.
+- **BL-025:** `register_namespace` writes `embedding_model` only when given explicitly, so re-registering a SHA (e.g. clearing it per BL-021) never resets which model a namespace is indexed with.
 
 ## SLAs
 
@@ -73,6 +77,9 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 | Malformed `VOYAGE_BATCH_THRESHOLD` | Raises `ValueError`; only that namespace's sync fails (BL-017) | Logged per namespace, cron job continues |
 | Collecting reindex does not complete | Batch state and `last_commit_sha` left unchanged for retry (BL-018) | Logged, cron job continues |
 | Namespace stuck on an unresolvable pending batch | `register.py --sha ""` clears it (BL-021) | Manual operator action |
+| `--embedding-model` names an unregistered model | Raises `ValueError` before any DB connection (BL-022) | CLI exit code |
+| Re-ingesting a namespace under a different model | Raises `RuntimeError`; index unchanged (BL-023) | CLI exit code |
+| `ingest.py --batch` with a non-batch-capable model | `parser.error` before ingest runs (BL-024) | CLI exit code |
 
 ## Acceptance criteria
 
@@ -98,6 +105,10 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 | AC-018 | `setup_table`'s migration block runs only while `content_hash` is missing from the table | BL-019 |
 | AC-019 | `ingest()` closes its connection even when an embedding call raises | BL-020 |
 | AC-020 | `register.py --sha ""` clears the namespace's pending batch rows and cached embeddings; a real SHA leaves them untouched | BL-021 |
+| AC-021 | `ingest()` raises for an unknown `--embedding-model` before opening a database connection | BL-022 |
+| AC-022 | `ingest()` refuses a different model for a namespace already recorded with one, including an unregistered namespace inferred to be `voyage-code-3` from its existing chunks | BL-023 |
+| AC-023 | A model with no Batch API never reads `rag_embedding_cache` and never submits a batch regardless of `use_batch`; `ingest.py --batch` refuses such a model outright | BL-024 |
+| AC-024 | `register_namespace` without `embedding_model` leaves an existing namespace's recorded model unchanged; with it, sets it on insert and on conflict | BL-025 |
 
 ## Open questions
 
@@ -111,3 +122,4 @@ Keep each namespace's index in step with its repo while minimising Voyage spend.
 |---|---|---|
 | 2026-10-12 | @julianam-w | Implemented: embedding reuse, Voyage Batch API full reindexes, index pruning, hourly sync. All ACs pass by automated test; AC-001, AC-002 and AC-005 also confirmed live against the real Voyage API and database |
 | 2026-10-12 | @julianam-w | Second `/code-review --fix` pass (8-angle): add BL-019..021 / AC-018..020 for a repeated-lock migration guard, a connection leak on error, and a `register.py` recovery path for a stuck pending batch |
+| 2026-10-17 | @julianam-w | Add BL-022..025 / AC-021..024: a namespace's embedding model is chosen at ingest, resolved by a registry (`rag/embeddings.py`), and never mixed — the Batch API and its cache stay Voyage-only, gated by `supports_batch_api` |

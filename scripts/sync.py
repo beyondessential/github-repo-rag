@@ -44,13 +44,17 @@ from rag.db import (
     setup_meta_table,
     update_namespace_sha,
 )
+from rag.embeddings import DEFAULT_MODEL_NAME, get_model
 from rag.github import get_changed_files, get_latest_sha, parse_repo_url, shallow_clone
 from scripts.ingest import ingest, replace_file_chunks
 
 CACHE_PAGE = 1000  # batch output rows per cache insert
 
 
-def _full_reindex(repo_url: str, namespace: str, token: str | None, use_batch: bool = True) -> bool:
+def _full_reindex(
+    repo_url: str, namespace: str, token: str | None, use_batch: bool = True,
+    embedding_model: str = DEFAULT_MODEL_NAME,
+) -> bool:
     """Clone and fully reindex. Returns False if a Voyage batch was submitted instead.
 
     Caller updates the commit SHA afterwards, only when this returns True.
@@ -60,7 +64,7 @@ def _full_reindex(repo_url: str, namespace: str, token: str | None, use_batch: b
         print(f"  Cloning {repo_url} (shallow)...")
         shallow_clone(repo_url, repo_path, token)
         # repo_url omitted — caller handles SHA registration
-        return ingest(repo_path, namespace, use_batch=use_batch)
+        return ingest(repo_path, namespace, use_batch=use_batch, embedding_model=embedding_model)
 
 
 def _collect_batches(conn, namespace: str, batch_ids: list[str]) -> bool:
@@ -108,6 +112,8 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
     namespace = ns["namespace"]
     repo_url = ns["repo_url"]
     last_sha = ns["last_commit_sha"]
+    embedding_model = ns["embedding_model"]
+    model = get_model(embedding_model)
 
     owner, repo = parse_repo_url(repo_url)
     latest_sha = get_latest_sha(owner, repo, token)
@@ -123,7 +129,7 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
         # at the other two full-reindex call sites rather than guarding a reachable path; a
         # genuine failure here raises and is caught by main()'s per-namespace handler instead,
         # leaving batch state untouched the same way.
-        if not _full_reindex(repo_url, namespace, token, use_batch=False):
+        if not _full_reindex(repo_url, namespace, token, use_batch=False, embedding_model=embedding_model):
             print(f"[{namespace}] Full reindex from cache did not complete — retrying next run")
             return
         # BL-008: advance the SHA, then clear batch state
@@ -140,7 +146,7 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
     # No previous SHA recorded — do a full reindex to establish a baseline
     if last_sha is None:
         print(f"[{namespace}] No baseline commit — running full reindex")
-        if _full_reindex(repo_url, namespace, token):
+        if _full_reindex(repo_url, namespace, token, embedding_model=embedding_model):
             register_namespace(conn, namespace, repo_url, latest_sha)
         return
 
@@ -149,7 +155,7 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
 
     if too_large:
         print(f"[{namespace}] Diff too large — falling back to full reindex")
-        if _full_reindex(repo_url, namespace, token):
+        if _full_reindex(repo_url, namespace, token, embedding_model=embedding_model):
             update_namespace_sha(conn, namespace, latest_sha)
         return
 
@@ -161,14 +167,14 @@ def sync_namespace(conn, ns: dict, token: str | None) -> None:
         return
 
     # Adds content_hash to tables created before embedding reuse existed
-    setup_db(conn, [f"{namespace}_code", f"{namespace}_docs"])
+    setup_db(conn, [f"{namespace}_code", f"{namespace}_docs"], dims=model.dims)
 
     # Re-embed changed files — requires a checkout for file content
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = os.path.join(tmpdir, "repo")
         print(f"  Cloning {repo_url} (shallow)...")
         shallow_clone(repo_url, repo_path, token)
-        replace_file_chunks(conn, namespace, Path(repo_path), changed, deleted)
+        replace_file_chunks(conn, namespace, Path(repo_path), changed, deleted, model)
 
     update_namespace_sha(conn, namespace, latest_sha)
     print(f"[{namespace}] Sync complete → {latest_sha[:8]}")

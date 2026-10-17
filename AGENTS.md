@@ -38,7 +38,7 @@ The MCP server does **retrieval only** — it never calls an LLM. The calling ag
 
 Each indexed repo gets a namespace (e.g. `tupaia`), creating `{namespace}_code` and `{namespace}_docs` tables. Namespace names are sanitised to valid PostgreSQL identifiers (e.g. `data-lake` → `data_lake`). Pass `namespace` to any tool to target the right repo.
 
-A namespace is indexed and queried with exactly one embedding model — vectors from different models are not comparable. The model is recorded in `rag_namespaces.embedding_model` (`voyage-code-3` by default) and resolved at query time via `rag.db.resolve_model()`; see `rag/embeddings.py`. Ingestion currently only writes voyage-code-3 vectors — registering a different model for a namespace without changing how it is ingested would desynchronise the two.
+A namespace is indexed and queried with exactly one embedding model — vectors from different models are not comparable. The model is chosen at ingest (`ingest.py --embedding-model`), recorded in `rag_namespaces.embedding_model` (`voyage-code-3` by default) and resolved at query time via `rag.db.resolve_model()`; see `rag/embeddings.py` for the registry. `ingest()` refuses to re-ingest an existing namespace with a different model, including one that predates the registry (inferred from the namespace already having chunks). The batch cache (`rag_embedding_cache`) and the Voyage Batch API are read/used only for a model with `supports_batch_api`.
 
 ## Environment variables
 

@@ -38,8 +38,14 @@ def get_conn(database_url: str):
     return conn
 
 
-def setup_table(conn, table: str) -> None:
+def setup_table(conn, table: str, dims: int = 1024) -> None:
     """Create a single RAG table with HNSW, FTS, file_path and content_hash indexes.
+
+    dims is only used on first creation — CREATE TABLE IF NOT EXISTS is a no-op against
+    an existing table, so this never changes an existing table's vector dimension. A
+    namespace's embedding model is fixed at ingest (see rag.db.register_namespace), so
+    this should only ever be called with the dims of the model a namespace is already
+    using. Inserting a vector of the wrong dimension is rejected by Postgres itself.
 
     The column/backfill migration below runs only while content_hash is missing —
     this is called on every ingest and sync tick (hourly, per namespace), and an
@@ -52,7 +58,7 @@ def setup_table(conn, table: str) -> None:
         cur.execute(f"""
             CREATE TABLE IF NOT EXISTS {table} (
                 id TEXT PRIMARY KEY,
-                embedding vector(1024) NOT NULL,
+                embedding vector({dims}) NOT NULL,
                 text TEXT NOT NULL,
                 file_path TEXT NOT NULL,
                 package TEXT NOT NULL DEFAULT '',
@@ -96,10 +102,10 @@ def setup_table(conn, table: str) -> None:
     conn.commit()
 
 
-def setup_db(conn, tables: list[str]) -> None:
-    """Create all RAG tables and indexes."""
+def setup_db(conn, tables: list[str], dims: int = 1024) -> None:
+    """Create all RAG tables and indexes. All of a namespace's tables share one model's dims."""
     for table in tables:
-        setup_table(conn, table)
+        setup_table(conn, table, dims=dims)
 
 
 # BL-011
@@ -257,7 +263,7 @@ def register_namespace(
 ) -> None:
     """Upsert a namespace entry with its latest indexed commit SHA.
 
-    embedding_model is written only when given explicitly. Omitting it (the default)
+    BL-025: embedding_model is written only when given explicitly. Omitting it (the default)
     leaves an existing namespace's recorded model untouched and a new one gets the
     column default (voyage-code-3) — re-registering a SHA must never silently reset
     which model a namespace is indexed with.
@@ -302,6 +308,26 @@ def get_namespaces(conn) -> list[dict]:
     return [
         {"namespace": r[0], "repo_url": r[1], "last_commit_sha": r[2], "embedding_model": r[3]} for r in rows
     ]
+
+
+def has_existing_chunks(conn, tables: list[str]) -> bool:
+    """True if any of the tables already has a row. A table that does not exist yet counts as empty.
+
+    BL-023: used to infer a namespace's model when it predates the embedding_model column, or was
+    never registered at all (ingested with no --repo, so rag_namespaces has no row for it)
+    — every such namespace is voyage-code-3, the only model that has ever existed before it.
+
+    Checks which tables exist up front rather than catching UndefinedTable, so a missing
+    table never rolls back other work a caller may already have done on this connection.
+    """
+    from rag.query import existing_tables
+
+    for table in existing_tables(conn, tables):
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT 1 FROM {table} LIMIT 1")
+            if cur.fetchone() is not None:
+                return True
+    return False
 
 
 def get_namespace_model(conn, namespace: str) -> str | None:

@@ -16,6 +16,18 @@ class FakeConn:
     def close(self) -> None: ...
 
 
+class _FakeModel:
+    """A stand-in EmbeddingModel matching voyage-code-3's shape; embed() returns zeros."""
+
+    name = "voyage-code-3"
+    dims = 1024
+    max_batch = 128
+    supports_batch_api = True
+
+    def embed(self, texts, input_type):
+        return [[0.0]] * len(texts)
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     for i in range(5):
@@ -28,12 +40,15 @@ def db(monkeypatch):
     """Stub every DB call ingest() makes and record what it does."""
     calls: dict[str, list] = {"upserts": [], "batches": [], "registered": [], "events": []}
     monkeypatch.setattr(ingest, "get_conn", lambda url: FakeConn())
-    monkeypatch.setattr(ingest, "setup_db", lambda conn, tables: None)
+    monkeypatch.setattr(ingest, "get_model", lambda name: _FakeModel())
+    monkeypatch.setattr(ingest, "get_namespace_model", lambda conn, ns: None)
+    monkeypatch.setattr(ingest, "has_existing_chunks", lambda conn, tables: False)
+    monkeypatch.setattr(ingest, "setup_db", lambda conn, tables, dims=1024: None)
     monkeypatch.setattr(ingest, "setup_meta_table", lambda conn: None)
     monkeypatch.setattr(ingest, "get_existing_hashes", lambda conn, tables, hashes: set())
     monkeypatch.setattr(ingest, "get_embeddings_by_hash", lambda conn, table, hashes: {})
     monkeypatch.setattr(ingest, "get_cached_embeddings", lambda conn, hashes: {})
-    monkeypatch.setattr(ingest, "embed_batch", lambda texts, input_type: [[0.0]] * len(texts))
+
     def upsert(conn, table, chunks, embs):
         calls["upserts"].append(table)
         calls["events"].append(f"upsert:{table}")
@@ -45,7 +60,10 @@ def db(monkeypatch):
     monkeypatch.setattr(ingest, "upsert_chunks", upsert)
     monkeypatch.setattr(ingest, "delete_chunks_except", delete_except)
     monkeypatch.setattr(ingest, "add_pending_batch", lambda conn, b, ns: calls["batches"].append((b, ns)))
-    monkeypatch.setattr(ingest, "register_namespace", lambda conn, ns, url, sha: calls["registered"].append(sha))
+    monkeypatch.setattr(
+        ingest, "register_namespace",
+        lambda conn, ns, url, sha, embedding_model=None: calls["registered"].append(sha),
+    )
     monkeypatch.setattr(voyage_batch, "upload_file", lambda content, name: "file-1")
     monkeypatch.setattr(voyage_batch, "create_batch", lambda file_id, metadata: {"id": "batch-1"})
     monkeypatch.setenv("DATABASE_URL", "postgresql://fake")
@@ -105,14 +123,16 @@ def test_ac_016_sync_main_isolates_a_namespace_that_raises_value_error(monkeypat
     monkeypatch.setattr(sync, "setup_meta_table", lambda conn: None)
     monkeypatch.setattr(sync, "purge_stale_cache", lambda conn: 0)
     namespaces = [
-        {"namespace": "bad", "repo_url": "https://github.com/o/bad", "last_commit_sha": None},
-        {"namespace": "good", "repo_url": "https://github.com/o/good", "last_commit_sha": "a" * 40},
+        {"namespace": "bad", "repo_url": "https://github.com/o/bad", "last_commit_sha": None,
+         "embedding_model": "voyage-code-3"},
+        {"namespace": "good", "repo_url": "https://github.com/o/good", "last_commit_sha": "a" * 40,
+         "embedding_model": "voyage-code-3"},
     ]
     monkeypatch.setattr(sync, "get_namespaces", lambda conn: namespaces)
     monkeypatch.setattr(sync, "get_latest_sha", lambda owner, repo, token: "a" * 40)
     monkeypatch.setattr(sync, "get_pending_batches", lambda conn, ns: [])
 
-    def fake_full_reindex(url, ns, token, use_batch=True):
+    def fake_full_reindex(url, ns, token, use_batch=True, embedding_model=None):
         # Exercises the real batch_threshold() call for the "bad" namespace's full reindex
         if ns == "bad":
             ingest.batch_threshold()
@@ -148,9 +168,12 @@ def sync_env(monkeypatch):
     calls: dict[str, list] = {"reindex": [], "registered": [], "deleted": [], "cached": [], "cleared": []}
     monkeypatch.setattr(sync, "get_latest_sha", lambda owner, repo, token: "b" * 40)
     monkeypatch.setattr(sync, "get_pending_batches", lambda conn, ns: ["batch-1"])
-    monkeypatch.setattr(sync, "_full_reindex", lambda url, ns, token, use_batch=True:
+    monkeypatch.setattr(sync, "_full_reindex", lambda url, ns, token, use_batch=True, embedding_model=None:
                         calls["reindex"].append(use_batch) or True)
-    monkeypatch.setattr(sync, "register_namespace", lambda conn, ns, url, sha: calls["registered"].append(sha))
+    monkeypatch.setattr(
+        sync, "register_namespace",
+        lambda conn, ns, url, sha, embedding_model=None: calls["registered"].append(sha),
+    )
     monkeypatch.setattr(sync, "delete_pending_batches", lambda conn, ids: calls["deleted"].append(ids))
     monkeypatch.setattr(sync, "cache_embeddings", lambda conn, b, rows: calls["cached"].append((b, rows)))
     monkeypatch.setattr(sync, "delete_cached_embeddings", lambda conn, ids: calls["cleared"].append(ids))
@@ -158,7 +181,10 @@ def sync_env(monkeypatch):
     return calls
 
 
-NS = {"namespace": "ns", "repo_url": "https://github.com/o/r", "last_commit_sha": "a" * 40}
+NS = {
+    "namespace": "ns", "repo_url": "https://github.com/o/r", "last_commit_sha": "a" * 40,
+    "embedding_model": "voyage-code-3",
+}
 
 
 def test_ac_004_skips_namespace_while_batch_in_progress(monkeypatch, sync_env):
@@ -194,7 +220,7 @@ def test_ac_006_failed_batch_drops_all_pending_rows_and_sync_raises(monkeypatch,
 def test_ac_002_too_large_diff_batch_submission_does_not_advance_sha(monkeypatch, sync_env):
     monkeypatch.setattr(sync, "get_pending_batches", lambda conn, ns: [])
     monkeypatch.setattr(sync, "get_changed_files", lambda *a: ([], [], True))
-    monkeypatch.setattr(sync, "_full_reindex", lambda url, ns, token, use_batch=True: False)
+    monkeypatch.setattr(sync, "_full_reindex", lambda url, ns, token, use_batch=True, embedding_model=None: False)
     advanced: list[str] = []
     monkeypatch.setattr(sync, "update_namespace_sha", lambda conn, ns, sha: advanced.append(sha))
     sync.sync_namespace(FakeConn(), NS, None)
@@ -238,7 +264,7 @@ def test_ac_015_ingest_leaves_a_zero_chunk_table_untouched(monkeypatch, repo, db
 
 def test_ac_017_collecting_reindex_does_not_advance_state_when_reindex_fails(monkeypatch, sync_env):
     monkeypatch.setattr(voyage_batch, "get_batch", lambda b: {"id": b, "status": "completed", "output_file_id": "out"})
-    monkeypatch.setattr(sync, "_full_reindex", lambda url, ns, token, use_batch=True:
+    monkeypatch.setattr(sync, "_full_reindex", lambda url, ns, token, use_batch=True, embedding_model=None:
                         sync_env["reindex"].append(use_batch) or False)
     sync.sync_namespace(FakeConn(), NS, None)
     assert sync_env["reindex"] == [False]
@@ -254,10 +280,11 @@ def test_ac_019_ingest_closes_connection_even_when_embedding_raises(monkeypatch,
 
     monkeypatch.setattr(ingest, "get_conn", lambda url: ClosingConn())
 
-    def boom(texts, input_type):
-        raise RuntimeError("voyage down")
+    class _BoomModel(_FakeModel):
+        def embed(self, texts, input_type):
+            raise RuntimeError("voyage down")
 
-    monkeypatch.setattr(ingest, "embed_batch", boom)
+    monkeypatch.setattr(ingest, "get_model", lambda name: _BoomModel())
 
     with pytest.raises(RuntimeError, match="voyage down"):
         ingest.ingest(str(repo), "ns")
