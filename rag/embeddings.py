@@ -63,15 +63,19 @@ class OpenAICompatModel:
     api_model: str
     dims: int
     max_batch: int = 32
-    query_instruction: str | None = None
+    # The exact literal prefix each model expects, prepended as-is — each model's own
+    # documented format, not a shared template. Qwen3-Embedding only prefixes queries;
+    # EmbeddingGemma prefixes both queries and documents, with different prefixes.
+    query_prefix: str | None = None
+    document_prefix: str | None = None
     supports_batch_api: bool = False
 
     def embed(self, texts: list[str], input_type: InputType) -> list[list[float]]:
         if len(texts) > self.max_batch:
             raise ValueError(f"{self.name} accepts at most {self.max_batch} texts per call, got {len(texts)}")
-        if input_type == "query" and self.query_instruction:
-            # Qwen3-Embedding's asymmetric format: documents get no prefix.
-            texts = [f"Instruct: {self.query_instruction}\nQuery: {t}" for t in texts]
+        prefix = self.query_prefix if input_type == "query" else self.document_prefix
+        if prefix:
+            texts = [f"{prefix}{t}" for t in texts]
 
         base_url = os.environ.get("EMBEDDING_BASE_URL")
         if not base_url:
@@ -104,14 +108,32 @@ class OpenAICompatModel:
 # Qwen3-Embedding-0.6B: Apache 2.0, 1024 dims (matches the vector(1024) column so no
 # schema change is needed), strong on code retrieval for its size. Serve it with
 # `ollama pull qwen3-embedding:0.6b` or Hugging Face TEI, either behind EMBEDDING_BASE_URL.
+#
+# EmbeddingGemma: Google, 307M params, 768 dims, Gemma Terms of Use. Built for on-device/edge
+# RAG, so useful both as a lighter-weight server-side comparison point and as the leading
+# candidate for an eventual on-device deployment. Serve it with `ollama pull embeddinggemma`.
 _MODELS: dict[str, EmbeddingModel] = {
     "voyage-code-3": VoyageModel(),
     "qwen3-embedding-0.6b": OpenAICompatModel(
         name="qwen3-embedding-0.6b",
         api_model="qwen3-embedding:0.6b",
         dims=1024,
-        max_batch=32,
-        query_instruction="Given a question about a codebase, retrieve the code or documentation that answers it",
+        # Kept small: a local Ollama server running this model under sustained load from
+        # a full-repo ingest was observed returning slow HTTP 400s then hanging entirely
+        # at max_batch=32. Smaller batches reduce per-request load on the server.
+        max_batch=8,
+        query_prefix=(
+            "Instruct: Given a question about a codebase, retrieve the code or documentation "
+            "that answers it\nQuery: "
+        ),
+    ),
+    "embeddinggemma": OpenAICompatModel(
+        name="embeddinggemma",
+        api_model="embeddinggemma:latest",
+        dims=768,
+        max_batch=8,  # same conservative cap as qwen3-embedding-0.6b, unverified under load yet
+        query_prefix="task: search result | query: ",
+        document_prefix="title: none | text: ",
     ),
 }
 

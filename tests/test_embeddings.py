@@ -70,7 +70,7 @@ def model(monkeypatch):
     monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
     return em.OpenAICompatModel(
         name="qwen3-embedding-0.6b", api_model="qwen3-embedding:0.6b", dims=2, max_batch=4,
-        query_instruction="Find the code that answers this question",
+        query_prefix="Instruct: Find the code that answers this question\nQuery: ",
     )
 
 
@@ -115,7 +115,7 @@ def test_openai_compat_model_adds_the_api_key_header_when_set(monkeypatch, model
     assert capture["headers"]["Authorization"] == "Bearer secret"
 
 
-def test_openai_compat_model_prefixes_queries_but_not_documents(monkeypatch, model):
+def test_openai_compat_model_prefixes_queries_but_not_documents_when_no_document_prefix_set(monkeypatch, model):
     capture: dict = {}
     monkeypatch.setattr(
         "urllib.request.urlopen", _fake_urlopen({"data": [{"embedding": [1.0, 2.0], "index": 0}]}, capture)
@@ -127,6 +127,23 @@ def test_openai_compat_model_prefixes_queries_but_not_documents(monkeypatch, mod
 
     model.embed(["how does X work?"], "document")
     assert capture["body"]["input"] == ["how does X work?"]
+
+
+def test_openai_compat_model_prefixes_documents_too_when_a_document_prefix_is_set(monkeypatch):
+    model = em.OpenAICompatModel(
+        name="embeddinggemma", api_model="embeddinggemma:latest", dims=2, max_batch=4,
+        query_prefix="task: search result | query: ", document_prefix="title: none | text: ",
+    )
+    capture: dict = {}
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "http://localhost:11434")
+    monkeypatch.setattr(
+        "urllib.request.urlopen", _fake_urlopen({"data": [{"embedding": [1.0, 2.0], "index": 0}]}, capture)
+    )
+    model.embed(["how does X work?"], "query")
+    assert capture["body"]["input"] == ["task: search result | query: how does X work?"]
+
+    model.embed(["def foo(): ..."], "document")
+    assert capture["body"]["input"] == ["title: none | text: def foo(): ..."]
 
 
 def test_openai_compat_model_reorders_by_index(monkeypatch, model):
