@@ -73,3 +73,38 @@ files = ["scripts/register.py", "README.md"]
 id = "http-auth"
 question = "How is access to the shared network server restricted to people in our Google Workspace?"
 files = ["mcp_server.py", "README.md"]
+
+[[questions]]
+id = "swap-embedding-provider"
+question = "How would I add support for a different embedding model than the one Voyage provides?"
+files = ["rag/embeddings.py"]
+
+[[questions]]
+id = "query-instruction-prefix"
+question = "Why do some embedding requests prepend extra instruction text to the question but not to source code?"
+files = ["rag/embeddings.py"]
+
+[[questions]]
+id = "prevent-mixed-model-namespace"
+question = "What stops someone from accidentally re-indexing an existing repo with a different embedding model than it already uses?"
+files = ["scripts/ingest.py"]
+
+[[questions]]
+id = "unregistered-namespace-model-guess"
+question = "If a repo was indexed without ever telling the tool which GitHub URL it came from, how does the system know which embedding model it used?"
+files = ["rag/db.py", "scripts/ingest.py"]
+
+[[questions]]
+id = "compare-two-indexes"
+question = "How can I tell whether one way of indexing a codebase finds better search results than another?"
+files = ["scripts/eval_retrieval.py"]
+
+[[questions]]
+id = "measure-answer-rank"
+question = "When scoring search quality, how is it decided how high up the correct file needs to appear to count as a good result?"
+files = ["scripts/eval_retrieval.py"]
+
+[[questions]]
+id = "local-embedding-server"
+question = "What has to be running on my own machine to index a repository with a model other than the paid API one?"
+files = ["rag/embeddings.py", "README.md"]

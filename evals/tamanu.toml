@@ -1,0 +1,64 @@
+# Tamanu (beyondessential/tamanu) retrieval questions, written and verified against a real
+# checkout by exploring the repo (not derived from real user queries). Paths below are
+# relative to the Tamanu repo root, not this one — run against a namespace indexed from
+# https://github.com/beyondessential/tamanu.
+
+[[questions]]
+id = "monorepo-layout"
+question = "What are the main packages in this repo and how do they fit together (central server, facility server, mobile, etc.)?"
+files = ["README.md"]
+
+[[questions]]
+id = "architecture-overview"
+question = "I'm new here — is there a document that explains the overall system architecture and the trickiest parts of this codebase?"
+files = ["llm/docs/initial-overview.md"]
+
+[[questions]]
+id = "sync-tick-flags"
+question = "How does the system decide whether a record still needs to be pushed to the other server during sync, and what do those special negative tick values mean?"
+files = ["packages/database/src/sync/constants.ts"]
+
+[[questions]]
+id = "sync-manager"
+question = "Where is the core logic that drives a facility's sync session with the central server (snapshotting changes, pushing/pulling, completing sessions)?"
+files = ["packages/central-server/app/sync/CentralSyncManager.js"]
+
+[[questions]]
+id = "auth-flow"
+question = "How does a user logging in through the web app actually get authenticated — does it talk to the central server or the local facility server first?"
+files = ["llm/docs/authentication.md"]
+
+[[questions]]
+id = "permission-verbs"
+question = "What actions/verbs can a permission grant someone in this system (read, write, run a report, etc.) and which object types support per-record permission scoping?"
+files = ["packages/constants/src/permissions.ts"]
+
+[[questions]]
+id = "report-generation"
+question = "How are the scheduled/on-demand data export reports actually generated and delivered (e.g. emailed or uploaded) under the hood?"
+files = ["packages/central-server/app/report/ReportRunner.js"]
+
+[[questions]]
+id = "survey-model"
+question = "What does the data model for a clinical survey/form look like — how is a survey linked to a program and what metadata does it carry (sensitive, visibility, notifications)?"
+files = ["packages/database/src/models/Survey.ts"]
+
+[[questions]]
+id = "migration-conventions"
+question = "What's the convention for creating a new database migration in this repo, and why shouldn't I hand-write the filename timestamp?"
+files = ["packages/database/CLAUDE.md"]
+
+[[questions]]
+id = "timezone-handling"
+question = "How does the app handle the fact that different facilities might be in different timezones while storing dates in the database?"
+files = ["llm/docs/initial-overview.md"]
+
+[[questions]]
+id = "e2e-test-setup"
+question = "How do I get the end-to-end Playwright tests running locally, and where does the test environment setup come from?"
+files = ["packages/e2e-tests/README.md"]
+
+[[questions]]
+id = "fhir-materialisation"
+question = "How does this system keep FHIR-compliant resources in sync with the native clinical data models?"
+files = ["llm/docs/initial-overview.md"]
