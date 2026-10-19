@@ -136,16 +136,30 @@ def fake_search(monkeypatch):
     return calls
 
 
+class _FakeModel:
+    """A stand-in EmbeddingModel that records what it was asked to embed."""
+
+    name = "fake-model"
+
+    def __init__(self, embed_fn=None) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self._embed_fn = embed_fn
+
+    def embed(self, texts, input_type):
+        if self._embed_fn is None:
+            raise AssertionError("fts mode must not embed")
+        [text] = texts
+        self.calls.append((text, input_type))
+        return [self._embed_fn(text, input_type)]
+
+
 def test_evaluate_embeds_once_per_question_and_searches_each_table_once_at_max_k(fake_search):
-    embedded: list[tuple[str, str]] = []
     questions = [ev.Question("1", "q1", ("x",)), ev.Question("2", "q2", ("y",))]
+    model = _FakeModel(lambda text, input_type: [0.1, 0.2])
 
-    outcomes, embed_ms = ev.evaluate(
-        None, "ns", questions, ["hybrid", "vector", "fts"], [6, 20],
-        embed_fn=lambda text, input_type: embedded.append((text, input_type)) or [0.1, 0.2],
-    )
+    outcomes, embed_ms = ev.evaluate(None, "ns", questions, ["hybrid", "vector", "fts"], [6, 20], model)
 
-    assert embedded == [("q1", "query"), ("q2", "query")]
+    assert model.calls == [("q1", "query"), ("q2", "query")]
     assert len(embed_ms) == 2
     assert len(fake_search) == 2 * 3 * 2  # questions × modes × tables
     assert {top_k for *_, top_k, _ in fake_search} == {20}
@@ -156,10 +170,10 @@ def test_evaluate_embeds_once_per_question_and_searches_each_table_once_at_max_k
 
 
 def test_evaluate_fts_only_never_embeds(fake_search):
-    def no_embed(text, input_type):
-        raise AssertionError("fts mode must not embed")
+    model = _FakeModel()  # no embed_fn: embed() raises if called
 
-    outcomes, embed_ms = ev.evaluate(None, "ns", [ev.Question("1", "q", ("a",))], ["fts"], [6], embed_fn=no_embed)
+    outcomes, embed_ms = ev.evaluate(None, "ns", [ev.Question("1", "q", ("a",))], ["fts"], [6], model)
+
     assert embed_ms == [] and len(outcomes) == 1
     assert fake_search == [("q", "ns_code", "fts", 6, False), ("q", "ns_docs", "fts", 6, False)]
 

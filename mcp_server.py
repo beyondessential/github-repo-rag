@@ -33,13 +33,12 @@ def _build_mcp(host: str, port: int, with_auth: bool):
     from mcp.server.fastmcp import FastMCP
 
     if with_auth:
+        from bes_mcp_oauth import GoogleOAuthProxyProvider
         from mcp.server.auth.settings import (
             AuthSettings,
             ClientRegistrationOptions,
             RevocationOptions,
         )
-
-        from bes_mcp_oauth import GoogleOAuthProxyProvider
 
         allowed_domain = os.environ.get("GOOGLE_ALLOWED_DOMAIN", "")
         allowed_emails = [
@@ -113,11 +112,18 @@ def _build_mcp(host: str, port: int, with_auth: bool):
             namespace: Identifier for the indexed repo to search (e.g. "tupaia"). Defaults to
                        "tupaia". Use list_namespaces() to see all available repos.
         """
+        from rag.db import get_conn, resolve_model, setup_meta_table
         from rag.query import retrieve
 
         namespace = sanitise_namespace(namespace)
         tables = [f"{namespace}_code", f"{namespace}_docs"]
-        return retrieve(question, tables=tables)
+        conn = get_conn(os.environ["DATABASE_URL"])
+        try:
+            setup_meta_table(conn)
+            model = resolve_model(conn, namespace)
+        finally:
+            conn.close()
+        return retrieve(question, tables=tables, model=model)
 
     @mcp.tool()
     def list_namespaces() -> list[str]:
@@ -192,8 +198,15 @@ def _build_mcp(host: str, port: int, with_auth: bool):
         import psycopg2
         from pgvector.psycopg2 import register_vector
 
+        from rag.db import setup_meta_table
+
         conn = psycopg2.connect(os.environ["DATABASE_URL"])
         register_vector(conn)
+        # Ensure rag_namespaces.embedding_model exists before the registry query below
+        # selects it — without this, a deployment that hasn't run the migration yet
+        # (via ingest/sync/search_codebase) would hit an UndefinedColumn error here,
+        # swallowed by the broad except below, losing repo_url/last_commit_sha too.
+        setup_meta_table(conn)
 
         namespace = sanitise_namespace(namespace)
 
@@ -215,7 +228,7 @@ def _build_mcp(host: str, port: int, with_auth: bool):
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT repo_url, last_commit_sha, last_indexed_at "
+                    "SELECT repo_url, last_commit_sha, last_indexed_at, embedding_model "
                     "FROM rag_namespaces WHERE namespace = %s",
                     (namespace,),
                 )
@@ -225,6 +238,7 @@ def _build_mcp(host: str, port: int, with_auth: bool):
                         "repo_url": row[0],
                         "last_commit_sha": row[1],
                         "last_indexed_at": row[2].isoformat() if row[2] else None,
+                        "embedding_model": row[3],
                     }
         except Exception:
             pass
