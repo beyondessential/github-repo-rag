@@ -1,0 +1,64 @@
+# Tupaia (beyondessential/tupaia) retrieval questions, written and verified against a real
+# checkout by exploring the repo (not derived from real user queries). Paths below are
+# relative to the Tupaia repo root, not this one — run against a namespace indexed from
+# https://github.com/beyondessential/tupaia.
+
+[[questions]]
+id = "monorepo-layout"
+question = "This looks like a big monorepo — what are the different kinds of packages here (apps vs backends vs libraries) and how do they relate?"
+files = ["README.md"]
+
+[[questions]]
+id = "external-data-import"
+question = "Where's the code that pulls health data in from different external systems like DHIS2, KoBoToolbox or weather feeds into one common format?"
+files = ["packages/data-broker/src/DataBroker/DataBroker.ts"]
+
+[[questions]]
+id = "report-data-fetching"
+question = "If a report needs to query different kinds of underlying data (raw SQL, entities, survey responses, analytics), how does it decide which data-fetching logic to use?"
+files = ["packages/data-table-server/src/dataTableService/getDataTableService.ts"]
+
+[[questions]]
+id = "permission-check"
+question = "Once a user is logged in, how does the code actually check if they're allowed to see a particular entity or do something at a certain permission level?"
+files = ["packages/access-policy/src/AccessPolicy.js"]
+
+[[questions]]
+id = "permission-group-hierarchy"
+question = "Permission groups seem to nest inside each other — where does the code actually expand a user's permission group assignments up through that hierarchy?"
+files = ["packages/auth/src/buildAccessPolicy.js"]
+
+[[questions]]
+id = "survey-response-model"
+question = "When someone submits a filled-out survey, what does that response record look like and what other things is it linked to (user, entity, answers)?"
+files = ["packages/database/src/core/modelClasses/SurveyResponse/SurveyResponse.js"]
+
+[[questions]]
+id = "dashboard-item-visibility"
+question = "When the frontend asks for the dashboard items to show, how does the server decide which ones a particular user is actually allowed to see?"
+files = ["packages/central-server/src/apiV2/dashboardItems/getPermittedDashboardItems.js"]
+
+[[questions]]
+id = "map-overlay-visibility"
+question = "Similarly, how are map overlays scoped so a user only sees overlays for countries/projects they have access to?"
+files = ["packages/web-config-server/src/apiV1/utils/findAccessibleGroupedMapOverlays.js"]
+
+[[questions]]
+id = "survey-import"
+question = "How does a survey spreadsheet get turned into the actual survey screens/questions config in the database?"
+files = ["packages/central-server/src/apiV2/import/importSurveys/importSurveyQuestions.js"]
+
+[[questions]]
+id = "model-base-class"
+question = "What's the common base class behind all the table-specific model classes, and what shared behaviour (caching, schema lookup) does it provide?"
+files = ["packages/database/src/core/DatabaseModel.js"]
+
+[[questions]]
+id = "central-server-test-setup"
+question = "I see some packages use Jest and others seem to run tests differently — what's going on with central-server's test setup specifically?"
+files = [".mocharc.js", "packages/central-server/package.json"]
+
+[[questions]]
+id = "platform-overview"
+question = "What problem is this whole platform actually trying to solve, and what's the high-level tech stack (DB, backend framework, frontend)?"
+files = ["llm/docs/initial-overview.md"]
