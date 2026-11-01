@@ -314,9 +314,3 @@ For an ad-hoc full reindex of one namespace, override the start command on that 
 ```bash
 uv run python scripts/ingest.py --repo <repo_url> --namespace <namespace>
 ```
-
-## Code review
-
-Pull requests are automatically reviewed by Claude via `.github/workflows/claude-code-review.yml`, which delegates to the shared [`maui-team`](https://github.com/beyondessential/maui-team) workflow. Re-trigger a review by commenting `/review` on any PR.
-
-Requires `ANTHROPIC_API_KEY` set as a repository secret.
